@@ -135,7 +135,34 @@ def dashboard():
         tq = db.session.query(Entry.kind, func.sum(Entry.amount)).filter(Entry.status == 'aprovado')
         if request.args.get('unit_id', type=int): tq = tq.filter(Entry.unit_id == request.args.get('unit_id', type=int))
         totals = dict(tq.group_by(Entry.kind).all())
-    return render_template('dashboard.html', entries=entries, incoming=totals.get('receita', Decimal('0')), outgoing=totals.get('despesa', Decimal('0')), units=Unit.query.filter_by(active=True).order_by(Unit.name).all(), selected_unit=request.args.get('unit_id', type=int))
+    # Um só financeiro: Matriz e Capela são origens dos lançamentos, não caixas independentes.
+    # O consolidado usa cada lançamento aprovado uma única vez.
+    location_summary = []
+    if current_user.role == 'padre':
+        grouped = db.session.query(Entry.unit_id, Entry.kind, func.sum(Entry.amount)).filter(
+            Entry.status == 'aprovado'
+        ).group_by(Entry.unit_id, Entry.kind).all()
+        areas = [
+            ('Matriz Santa Terezinha do Menino Jesus', {'Matriz Santa Terezinha do Menino Jesus', 'Santa Terezinha do Menino Jesus'}),
+            ('Capela Santa Luzia', {'Capela Santa Luzia'}),
+        ]
+        units_by_id = {u.id: u.name for u in Unit.query.all()}
+        amounts = {name: {'receita': Decimal('0'), 'despesa': Decimal('0')} for name, _ in areas}
+        amounts['Geral / outros projetos'] = {'receita': Decimal('0'), 'despesa': Decimal('0')}
+        for unit_key, kind, value in grouped:
+            if kind not in ('receita', 'despesa'):
+                continue
+            origin = units_by_id.get(unit_key)
+            area = next((name for name, aliases in areas if origin in aliases), 'Geral / outros projetos')
+            amounts[area][kind] += value or Decimal('0')
+        for name, values in amounts.items():
+            location_summary.append({
+                'name': name,
+                'income': values['receita'],
+                'expense': values['despesa'],
+                'balance': values['receita'] - values['despesa'],
+            })
+    return render_template('dashboard.html', entries=entries, incoming=totals.get('receita', Decimal('0')), outgoing=totals.get('despesa', Decimal('0')), units=Unit.query.filter_by(active=True).order_by(Unit.name).all(), selected_unit=request.args.get('unit_id', type=int), location_summary=location_summary)
 
 @app.post('/entries')
 @login_required
@@ -347,11 +374,31 @@ if __name__ == '__main__': app.run(debug=False)
 
 @app.cli.command('seed-parish-units')
 def seed_parish_units():
-    """Cadastra a paróquia e a capela sem duplicar registros existentes."""
-    for name in ('Santa Terezinha do Menino Jesus', 'Capela Santa Luzia'):
-        if not Unit.query.filter_by(name=name).first():
-            db.session.add(Unit(name=name, kind='comunidade'))
-            click.echo(f'Criada unidade: {name}')
-        else:
-            click.echo(f'Unidade já existente: {name}')
+    """Configura Matriz e Capela no caixa paroquial único, preservando lançamentos."""
+    matrix_name = 'Matriz Santa Terezinha do Menino Jesus'
+    old_name = 'Santa Terezinha do Menino Jesus'
+    chapel_name = 'Capela Santa Luzia'
+    matrix = Unit.query.filter_by(name=matrix_name).first()
+    legacy = Unit.query.filter_by(name=old_name).first()
+    if not matrix and legacy:
+        legacy.name = matrix_name  # Mantém ID e todos os lançamentos existentes.
+        legacy.kind = 'comunidade'
+        legacy.active = True
+        click.echo('Matriz renomeada sem alterar seus lançamentos.')
+    elif not matrix:
+        db.session.add(Unit(name=matrix_name, kind='comunidade'))
+        click.echo('Matriz cadastrada.')
+    else:
+        matrix.active = True
+        click.echo('Matriz já cadastrada.')
+    chapel = Unit.query.filter_by(name=chapel_name).first()
+    if not chapel:
+        db.session.add(Unit(name=chapel_name, kind='comunidade'))
+        click.echo('Capela Santa Luzia cadastrada.')
+    else:
+        chapel.active = True
+        click.echo('Capela Santa Luzia já cadastrada.')
+    if matrix and legacy:
+        click.echo('Atenção: existem Matriz e unidade antiga; revise os vínculos antigos manualmente.')
     db.session.commit()
+    click.echo('Unidades prontas. O financeiro consolidado continua único.')
