@@ -1,1 +1,56 @@
-{% extends 'base.html' %}{% block content %}<h1>Usuários e permissões</h1><section class="card"><h2>Criar conta</h2><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><div class="fields"><label>Usuário<input name="username" required maxlength="80"></label><label>Perfil<select name="role"><option value="secretaria">Secretaria</option><option value="padre">Padre</option></select></label><label>Senha inicial (mínimo 12 caracteres)<input name="password" type="password" minlength="12" required></label></div><button>Criar usuário</button></form></section><section class="card"><h2>Contas</h2><table><tr><th>Usuário</th><th>Perfil</th><th>Status</th><th>Ação</th></tr>{% for u in users %}<tr><td>{{ u.username }}</td><td>{{ u.role }}</td><td>{{ 'Ativo' if u.active else 'Inativo' }}</td><td>{% if u.id != current_user.id %}<form method="post" action="{{ url_for('toggle_user', user_id=u.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="small secondary">{{ 'Desativar' if u.active else 'Ativar' }}</button></form>{% endif %}</td></tr>{% endfor %}</table></section>{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<h1>Usuários e níveis de acesso</h1>
+<p class="note">Defina as funções de cada secretário. Quem registra apenas coletas não vê saldos, lançamentos nem relatórios.</p>
+<section class="card">
+<h2>Adicionar usuário</h2>
+<form method="post">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<div class="fields">
+<label>Nome de usuário<input name="username" maxlength="80" required></label>
+<label>Perfil<select name="role" id="roleSelect"><option value="secretaria">Secretaria</option><option value="padre">Padre</option></select></label>
+<label>Senha inicial (mínimo 12 caracteres)<input type="password" name="password" minlength="12" required autocomplete="new-password"></label>
+</div>
+<label id="staffAccess">Nível de acesso
+<select name="access_mode">
+<option value="collections" selected>Somente registrar coletas das missas</option>
+<option value="entries">Registrar receitas e despesas</option>
+<option value="both">Registrar receitas, despesas e coletas</option>
+</select></label>
+<button type="submit">Criar conta</button>
+</form>
+</section>
+<section class="card">
+<h2>Contas e permissões</h2>
+<div class="tablewrap"><table><thead><tr><th>Usuário</th><th>Perfil</th><th>Acesso</th><th>Situação</th><th>Ações</th></tr></thead><tbody>
+{% for u in users %}
+{% set p = permissions.get(u.id) %}
+{% set mode = 'both' if p and p.can_entries and p.can_collections else 'collections' if p and p.can_collections else 'entries' %}
+<tr>
+<td><b>{{ u.username }}</b></td><td>{{ 'Padre' if u.role == 'padre' else 'Secretaria' }}</td>
+<td>{% if u.role == 'padre' %}Administrador completo{% else %}
+<form method="post" action="{{ url_for('change_user_permissions', user_id=u.id) }}" class="permissions-row">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<select name="access_mode" aria-label="Acesso de {{ u.username }}">
+<option value="collections" {% if mode == 'collections' %}selected{% endif %}>Somente coletas</option>
+<option value="entries" {% if mode == 'entries' %}selected{% endif %}>Receitas e despesas</option>
+<option value="both" {% if mode == 'both' %}selected{% endif %}>Coletas e lançamentos</option>
+</select>
+<button class="small" type="submit">Salvar acesso</button>
+</form>{% endif %}</td>
+<td>{{ 'Ativo' if u.active else 'Inativo' }}</td>
+<td>{% if u.id != current_user.id %}
+<form method="post" action="{{ url_for('toggle_user', user_id=u.id) }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<button class="small secondary" type="submit">{{ 'Desativar' if u.active else 'Ativar' }}</button>
+</form>{% else %}Conta atual{% endif %}</td>
+</tr>
+{% endfor %}
+</tbody></table></div>
+</section>
+<script>
+const roleSelect = document.getElementById('roleSelect'), access = document.getElementById('staffAccess');
+function adjustAccess(){access.hidden = roleSelect.value === 'padre';}
+roleSelect.addEventListener('change', adjustAccess); adjustAccess();
+</script>
+{% endblock %}
