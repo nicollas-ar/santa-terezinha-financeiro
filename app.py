@@ -395,21 +395,53 @@ def export_csv():
 def audit_log():
     return render_template('audit.html', logs=Audit.query.order_by(Audit.id.desc()).limit(250).all())
 
-@app.route('/users', methods=['GET','POST'])
+@app.route('/users', methods=['GET', 'POST'])
 @priest_only
 def users():
     if request.method == 'POST':
-        username = request.form.get('username','').strip()[:80]
+        username = request.form.get('username', '').strip()[:80]
         role = request.form.get('role')
-        password = request.form.get('password','')
-        if not username or role not in ('padre','secretaria') or len(password) < 12 or User.query.filter_by(username=username).first():
+        password = request.form.get('password', '')
+        mode = request.form.get('access_mode', 'collections')
+        if (not username or role not in ('padre', 'secretaria') or len(password) < 12
+                or User.query.filter_by(username=username).first()
+                or (role == 'secretaria' and mode not in ('collections', 'entries', 'both'))):
             flash('Confira usuário, perfil e senha (mínimo 12 caracteres).', 'error')
         else:
             user = User(username=username, role=role, password_hash=generate_password_hash(password))
-            db.session.add(user); db.session.flush(); audit('criar', 'usuario', user.id, role); db.session.commit()
-            flash('Usuário criado.', 'success')
+            db.session.add(user)
+            db.session.flush()
+            if role == 'secretaria':
+                db.session.add(StaffPermission(user_id=user.id,
+                    can_entries=mode in ('entries', 'both'),
+                    can_collections=mode in ('collections', 'both')))
+            audit('criar', 'usuario', user.id, role)
+            db.session.commit()
+            flash('Usuário criado com suas permissões.', 'success')
         return redirect(url_for('users'))
-    return render_template('users.html', users=User.query.order_by(User.username).all())
+    people = User.query.order_by(User.username).all()
+    permissions = {p.user_id: p for p in StaffPermission.query.all()}
+    return render_template('users.html', users=people, permissions=permissions)
+
+@app.post('/users/<int:user_id>/permissions')
+@priest_only
+def change_user_permissions(user_id):
+    user = db.get_or_404(User, user_id)
+    if user.role != 'secretaria':
+        abort(400, 'A conta do padre sempre mantém o nível administrativo.')
+    mode = request.form.get('access_mode')
+    if mode not in ('collections', 'entries', 'both'):
+        abort(400)
+    p = db.session.get(StaffPermission, user.id)
+    if p is None:
+        p = StaffPermission(user_id=user.id)
+        db.session.add(p)
+    p.can_entries = mode in ('entries', 'both')
+    p.can_collections = mode in ('collections', 'both')
+    audit('permissoes', 'usuario', user.id, mode)
+    db.session.commit()
+    flash('Permissões atualizadas.', 'success')
+    return redirect(url_for('users'))
 
 @app.post('/users/<int:user_id>/toggle')
 @priest_only
