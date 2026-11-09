@@ -45,3 +45,19 @@ flask --app app seed-parish-units
 ```
 
 O comando é idempotente e não remove nem altera lançamentos existentes. A paróquia e a capela são cadastradas como unidades do tipo `comunidade`, para permitir filtros separados nos relatórios. Não execute `init-db` em um banco de produção sem antes avaliar o estado do banco. Não envie `.env` ao GitHub.
+
+## Caixa único: Matriz e Capela Santa Luzia
+A **Paróquia Santa Terezinha do Menino Jesus** possui **um único financeiro consolidado**.
+- Os lançamentos podem ser vinculados à **Matriz Santa Terezinha do Menino Jesus** ou à **Capela Santa Luzia**.
+- O dashboard geral soma cada lançamento aprovado apenas uma vez; o comparativo por origem não cria caixa bancário separado.
+- Lançamentos de projetos, campanhas e sem unidade ficam em **Geral / outros projetos**, permitindo reconciliação com o total.
+- Os filtros por unidade permitem consultar Matriz ou Capela individualmente.
+- O perfil `padre` visualiza comparativos; a secretaria continua vendo apenas os próprios registros.
+
+**Depois de atualizar o Render**, execute uma vez (e com a mesma `DATABASE_URL` do Neon usada no Render):
+```bash
+flask --app app seed-parish-units
+```
+O comando pode ser executado novamente sem criar cópias. Caso exista apenas a antiga unidade `Santa Terezinha do Menino Jesus`, ela é renomeada para Matriz preservando o ID e os lançamentos existentes. Caso existam ambas, o sistema não faz uma migração automática potencialmente ambígua. Faça backup antes de executar em banco com dados reais.
+
+Observação: projetos e campanhas continuam como unidades de classificação independentes; esta versão não implementa dupla alocação de um mesmo lançamento a local e projeto simultaneamente.
