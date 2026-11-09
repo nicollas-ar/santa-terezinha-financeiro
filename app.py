@@ -551,7 +551,8 @@ def submit_collection():
 @priest_only
 def review_collection(collection_id, action):
     if action not in ('aprovar', 'rejeitar'): abort(404)
-    collection = db.session.query(MassCollection).filter_by(id=collection_id).with_for_update().first_or_404()
+    collection = db.session.query(MassCollection).filter_by(id=collection_id).with_for_update().first()
+    if collection is None: abort(404)
     if collection.status != 'pendente': abort(409, 'Coleta já analisada.')
     if action == 'aprovar':
         entry = Entry(kind='receita', category='Coleta',
