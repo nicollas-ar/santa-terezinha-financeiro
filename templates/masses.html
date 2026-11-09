@@ -1,0 +1,42 @@
+{% extends 'base.html' %}
+{% block content %}
+<p class="eyebrow">ADMINISTRAÇÃO PAROQUIAL</p>
+<h1>Missas e coletas</h1>
+<p class="note">Cadastre horários fixos e aprove os valores enviados pela equipe. Coletas aprovadas entram automaticamente no financeiro geral da paróquia.</p>
+<section class="card">
+<h2>Nova missa recorrente</h2>
+<form method="post">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<div class="fields">
+<label>Nome da missa<input name="title" maxlength="110" placeholder="Ex.: Missa dominical das 10h" required></label>
+<label>Local<select name="unit_id" required><option value="">Escolha a Matriz ou Capela</option>{% for unit in units %}<option value="{{ unit.id }}">{{ unit.name }}</option>{% endfor %}</select></label>
+<label>Horário<input type="time" name="time" value="10:00" required></label>
+<label>Repetição<select name="frequency" id="frequency"><option value="semanal">Toda semana</option><option value="mensal">Todo mês</option></select></label>
+<label id="weeklyField">Dia da semana<select name="weekday">{% for n, day in [(0,'Segunda-feira'),(1,'Terça-feira'),(2,'Quarta-feira'),(3,'Quinta-feira'),(4,'Sexta-feira'),(5,'Sábado'),(6,'Domingo')] %}<option value="{{ n }}" {% if n == 6 %}selected{% endif %}>{{ day }}</option>{% endfor %}</select></label>
+<label id="monthlyField" hidden>Dia do mês<input name="month_day" type="number" min="1" max="31" value="1"></label>
+<label>Data de início<input name="start_date" type="date" value="{{ today.isoformat() }}" required></label>
+</div><button type="submit">Salvar horário da missa</button></form>
+<p class="note">Se programar para o dia 31, por exemplo, a missa só aparecerá nos meses que tiverem dia 31.</p>
+</section>
+<section class="card"><h2>Horários cadastrados</h2>
+<div class="tablewrap"><table><thead><tr><th>Missa</th><th>Local</th><th>Repetição</th><th>Horário</th><th>Status</th><th>Ação</th></tr></thead><tbody>
+{% for m in schedules %}
+<tr><td>{{m.title}}</td><td>{{m.unit.name}}</td><td>{{ 'Semanal · '+['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'][m.weekday] if m.frequency == 'semanal' else 'Mensal · dia '+m.month_day|string }}</td><td>{{m.time}}</td><td>{{ 'Ativa' if m.active else 'Inativa' }}</td><td><form method="post" action="{{url_for('toggle_mass',schedule_id=m.id)}}"><input type="hidden" name="csrf_token" value="{{csrf_token}}"><button class="small secondary">{{ 'Desativar' if m.active else 'Ativar' }}</button></form></td></tr>
+{% else %}<tr><td colspan="6">Nenhuma missa cadastrada.</td></tr>{% endfor %}
+</tbody></table></div></section>
+<section class="card"><h2>Coletas aguardando aprovação</h2>
+<div class="tablewrap"><table><thead><tr><th>Data</th><th>Missa</th><th>Local</th><th>Valor</th><th>Registrada por</th><th>Ações</th></tr></thead><tbody>
+{% for c in pending %}
+<tr><td>{{c.celebration_date.strftime('%d/%m/%Y')}}</td><td>{{c.schedule.title}}</td><td>{{c.schedule.unit.name}}</td><td><b>R$ {{'%.2f'|format(c.amount)|replace('.',',')}}</b></td><td>{{c.recorder.username}}</td><td><div class="actions">
+{% for action,label in [('aprovar','Aprovar'),('rejeitar','Rejeitar')] %}
+<form method="post" action="{{url_for('review_collection',collection_id=c.id,action=action)}}"><input type="hidden" name="csrf_token" value="{{csrf_token}}"><button class="small {{'secondary' if action == 'rejeitar' else ''}}" type="submit">{{label}}</button></form>
+{% endfor %}</div></td></tr>
+{% else %}<tr><td colspan="6">Não há coletas pendentes.</td></tr>{% endfor %}
+</tbody></table></div></section>
+<section class="card"><h2>Últimos registros</h2><div class="tablewrap"><table><thead><tr><th>Data</th><th>Missa</th><th>Valor</th><th>Status</th></tr></thead><tbody>{% for c in recent %}<tr><td>{{c.celebration_date.strftime('%d/%m/%Y')}}</td><td>{{c.schedule.title}}</td><td>R$ {{'%.2f'|format(c.amount)|replace('.',',')}}</td><td>{{c.status|capitalize}}</td></tr>{% else %}<tr><td colspan="4">Nenhuma coleta registrada.</td></tr>{% endfor %}</tbody></table></div></section>
+<script>
+const frequency = document.getElementById('frequency'), weekly = document.getElementById('weeklyField'), monthly = document.getElementById('monthlyField');
+function updateFrequency(){weekly.hidden = frequency.value !== 'semanal'; monthly.hidden = frequency.value !== 'mensal';}
+frequency.addEventListener('change', updateFrequency); updateFrequency();
+</script>
+{% endblock %}
