@@ -510,7 +510,7 @@ def collections():
     upcoming = []
     for schedule in schedules:
         for day in mass_dates(schedule, today):
-            if (schedule.id, day) not in existing:
+            if day <= today and (schedule.id, day) not in existing:
                 upcoming.append({'schedule': schedule, 'date': day})
     upcoming.sort(key=lambda item: (item['date'], item['schedule'].time, item['schedule'].title))
     records = MassCollection.query.filter_by(created_by=current_user.id).order_by(
@@ -524,7 +524,7 @@ def submit_collection():
     schedule = db.get_or_404(MassSchedule, request.form.get('schedule_id', type=int))
     try: day = date.fromisoformat(request.form.get('celebration_date', ''))
     except ValueError: abort(400)
-    if not schedule.active or day not in mass_dates(schedule):
+    if not schedule.active or day > date.today() or day not in mass_dates(schedule):
         abort(400, 'Missa fora do período permitido.')
     amount = parse_money(request.form.get('amount', ''))
     if amount is None:
@@ -551,7 +551,7 @@ def submit_collection():
 @priest_only
 def review_collection(collection_id, action):
     if action not in ('aprovar', 'rejeitar'): abort(404)
-    collection = db.get_or_404(MassCollection, collection_id)
+    collection = db.session.query(MassCollection).filter_by(id=collection_id).with_for_update().first_or_404()
     if collection.status != 'pendente': abort(409, 'Coleta já analisada.')
     if action == 'aprovar':
         entry = Entry(kind='receita', category='Coleta',
@@ -581,7 +581,7 @@ def init_db():
 @app.cli.command('upgrade-collections')
 def upgrade_collections():
     """Cria somente as tabelas adicionais sem alterar lançamentos existentes."""
-    db.create_all(tables=[StaffPermission.__table__, MassSchedule.__table__, MassCollection.__table__])
+    db.metadata.create_all(bind=db.engine, tables=[StaffPermission.__table__, MassSchedule.__table__, MassCollection.__table__])
     print('Tabelas de permissões, missas e coletas criadas sem apagar dados.')
 
 @app.cli.command('create-user')
