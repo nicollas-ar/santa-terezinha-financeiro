@@ -1,5 +1,5 @@
 import os, secrets, csv, io
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import wraps
 import click
@@ -7,7 +7,8 @@ from flask import Flask, render_template, request, redirect, url_for, flash, abo
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
-from sqlalchemy import func
+from sqlalchemy import func, UniqueConstraint
+from sqlalchemy.exc import IntegrityError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -64,6 +65,72 @@ class Audit(db.Model):
     details = db.Column(db.String(500), nullable=False, default='')
     user = db.relationship('User')
 
+
+class StaffPermission(db.Model):
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), primary_key=True)
+    can_entries = db.Column(db.Boolean, nullable=False, default=False)
+    can_collections = db.Column(db.Boolean, nullable=False, default=True)
+
+class MassSchedule(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(110), nullable=False)
+    unit_id = db.Column(db.Integer, db.ForeignKey('unit.id'), nullable=False)
+    unit = db.relationship('Unit')
+    frequency = db.Column(db.String(12), nullable=False)
+    weekday = db.Column(db.Integer)
+    month_day = db.Column(db.Integer)
+    time = db.Column(db.String(5), nullable=False)
+    start_date = db.Column(db.Date, nullable=False)
+    active = db.Column(db.Boolean, nullable=False, default=True)
+
+class MassCollection(db.Model):
+    __table_args__ = (UniqueConstraint('schedule_id', 'celebration_date', name='uq_mass_collection_occurrence'),)
+    id = db.Column(db.Integer, primary_key=True)
+    schedule_id = db.Column(db.Integer, db.ForeignKey('mass_schedule.id'), nullable=False)
+    schedule = db.relationship('MassSchedule')
+    celebration_date = db.Column(db.Date, nullable=False)
+    amount = db.Column(db.Numeric(12, 2), nullable=False)
+    created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    recorder = db.relationship('User', foreign_keys=[created_by])
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    status = db.Column(db.String(12), nullable=False, default='pendente')
+    reviewed_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    reviewed_at = db.Column(db.DateTime(timezone=True))
+    entry_id = db.Column(db.Integer, db.ForeignKey('entry.id'), unique=True)
+    entry = db.relationship('Entry')
+
+def staff_capability(capability):
+    if not current_user.is_authenticated or not current_user.active:
+        return False
+    if current_user.role == 'padre':
+        return True
+    if current_user.role != 'secretaria':
+        return False
+    permission = db.session.get(StaffPermission, current_user.id)
+    if permission is None:
+        return capability == 'entries'  # Preserva o acesso de secretarias antigas.
+    return bool(getattr(permission, 'can_' + capability, False))
+
+def require_staff(capability):
+    if not staff_capability(capability):
+        abort(403)
+
+def landing_page():
+    return 'dashboard' if staff_capability('entries') else 'collections'
+
+def mass_dates(schedule, today=None):
+    today = today or date.today()
+    result = []
+    for offset in range(-7, 22):
+        day = today + timedelta(days=offset)
+        if day < schedule.start_date:
+            continue
+        if schedule.frequency == 'semanal' and day.weekday() == schedule.weekday:
+            result.append(day)
+        elif schedule.frequency == 'mensal' and day.day == schedule.month_day:
+            result.append(day)
+    return result
+
 @login_manager.user_loader
 def load_user(uid):
     try: return db.session.get(User, int(uid))
@@ -78,7 +145,7 @@ def check_csrf():
 @app.context_processor
 def common():
     if 'csrf_token' not in session: session['csrf_token'] = secrets.token_urlsafe(32)
-    return {'csrf_token': session['csrf_token']}
+    return {'csrf_token': session['csrf_token'], 'staff_capability': staff_capability}
 
 def priest_only(fn):
     @wraps(fn)
@@ -104,13 +171,13 @@ def parse_date(value):
 
 @app.route('/login', methods=['GET','POST'])
 def login():
-    if current_user.is_authenticated: return redirect(url_for('dashboard'))
+    if current_user.is_authenticated: return redirect(url_for(landing_page()))
     if request.method == 'POST':
         user = User.query.filter_by(username=request.form.get('username','').strip(), active=True).first()
         if user and check_password_hash(user.password_hash, request.form.get('password','')):
             session.clear()
             login_user(user)
-            return redirect(url_for('dashboard'))
+            return redirect(url_for(landing_page()))
         flash('Credenciais inválidas.', 'error')
     return render_template('login.html')
 
@@ -124,6 +191,7 @@ def logout():
 @app.get('/')
 @login_required
 def dashboard():
+    require_staff('entries')
     q = Entry.query
     if current_user.role != 'padre': q = q.filter_by(created_by=current_user.id)
     else:
@@ -167,6 +235,7 @@ def dashboard():
 @app.post('/entries')
 @login_required
 def add_entry():
+    require_staff('entries')
     kind = request.form.get('kind')
     category = request.form.get('category','').strip()[:80]
     description = request.form.get('description','').strip()[:255]
