@@ -13,3 +13,28 @@
 .location-values{display:grid;gap:9px;margin:12px 0}.location-values span{display:flex;align-items:center;justify-content:space-between;gap:6px;color:var(--muted);font-size:.8rem}.location-values b{color:#273c60;font-size:.85rem}
 .location-result{border-top:1px solid var(--line);padding-top:12px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;color:var(--muted);font-size:.8rem}.location-result strong{color:var(--navy);font-size:.93rem}
 @media(max-width:1200px){.location-grid{grid-template-columns:1fr}}
+
+
+/* Acessibilidade das coletas: alvos grandes, textos legíveis e poucos campos */
+[hidden]{display:none!important}
+.permissions-row{display:flex;gap:8px;align-items:center;min-width:255px}
+.permissions-row select{min-width:165px;margin:0}
+.collection-page{max-width:930px;margin:0 auto}
+.collection-intro{text-align:center;margin:14px 0 28px}
+.collection-intro h1{font-size:clamp(2rem,4vw,3rem)}
+.collection-intro>p:not(.eyebrow){font-size:1.18rem;color:#586a85}
+.mass-option-list{display:grid;gap:20px}
+.mass-option{background:#fff;border:2px solid #dce2ed;border-radius:22px;padding:clamp(22px,4vw,35px);box-shadow:0 10px 34px #172b4f10}
+.mass-option h2{font-family:'DM Sans',sans-serif;font-size:clamp(1.45rem,3vw,2rem);margin:13px 0 6px}
+.mass-option .mass-location{font-size:1.1rem;margin:0 0 23px;color:#586a85}
+.mass-date{display:inline-block;background:#edf1f8;padding:9px 14px;border-radius:10px;font-weight:800;color:#1b3763}
+.collection-form label{font-size:1.25rem;font-weight:800}
+.collection-amount{min-height:72px;font-size:1.7rem;border:2px solid #99abc5;border-radius:14px;padding:16px}
+.collection-submit{min-height:73px;width:100%;background:#1b4e40;border-color:#1b4e40;font-size:1.18rem;border-radius:14px;margin-top:19px}
+.collection-submit:hover{background:#266b54}
+.collection-empty{text-align:center;padding:35px}
+.collection-history{margin-top:25px}
+.collection-record{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:19px 0;border-bottom:1px solid var(--line)}
+.collection-record span{display:grid;gap:5px}
+.collection-record small{font-size:.85rem}
+@media(max-width:650px){.collection-record{align-items:flex-start;flex-direction:column}.collection-submit{font-size:1.05rem}.collection-form label{font-size:1.1rem}}
