@@ -61,3 +61,26 @@ flask --app app seed-parish-units
 O comando pode ser executado novamente sem criar cópias. Caso exista apenas a antiga unidade `Santa Terezinha do Menino Jesus`, ela é renomeada para Matriz preservando o ID e os lançamentos existentes. Caso existam ambas, o sistema não faz uma migração automática potencialmente ambígua. Faça backup antes de executar em banco com dados reais.
 
 Observação: projetos e campanhas continuam como unidades de classificação independentes; esta versão não implementa dupla alocação de um mesmo lançamento a local e projeto simultaneamente.
+
+
+## Permissões por secretaria, horários de missas e coletas
+
+- O padre pode criar contas com nível **Somente coletas**, **Receitas e despesas** ou **Ambos** e alterar a escolha em **Usuários**. A autorização é verificada no Flask, não apenas no menu.
+- Secretarias antigas que ainda não têm configuração continuam com o acesso anterior a lançamentos (não recebem automaticamente acesso às coletas).
+- Em **Missas e coletas**, o padre cadastra missas semanais (dia da semana) e mensais (dia do mês), com horário, local e data inicial.
+- Em **Registrar coleta**, a pessoa escolhe uma celebração dos últimos sete dias, informa um valor e confirma. A data e o local são preenchidos automaticamente. Botões e campos são amplos para facilitar o uso.
+- Cada missa/ocorrência aceita uma coleta registrada. Ela fica **pendente** até o padre aprovar. Só então é criado um lançamento aprovado de receita **Coleta** no caixa paroquial consolidado, atribuído à Matriz ou à Capela Santa Luzia.
+- Desativar uma missa interrompe o aparecimento de novas ocorrências; os registros históricos permanecem.
+- Dias 29, 30 e 31 não são gerados em meses que não têm esses dias. Esta versão não prevê missas extraordinárias, remarcação de coletas rejeitadas ou edição de coletas após o envio; nesses casos deve ser definido um procedimento administrativo.
+
+### Atualização obrigatória do Neon existente
+**Antes de fazer login após o deploy desta versão**, execute no terminal local com o mesmo `DATABASE_URL` configurado no Render:
+
+```bash
+flask --app app upgrade-collections
+flask --app app seed-parish-units
+```
+
+O primeiro comando cria três tabelas novas (`staff_permission`, `mass_schedule`, `mass_collection`), sem apagar ou modificar as tabelas financeiras existentes. O segundo assegura que Matriz e Capela estejam cadastradas. Faça backup do banco antes da atualização. Não repita `create-user`: a conta do padre continua no banco.
+
+**Importante:** esta é uma evolução de protótipo, ainda não validada para uso financeiro real; faltam testes integrados, backup/restauração, proteção de dados e procedimentos de conferência.
