@@ -453,10 +453,136 @@ def toggle_user(user_id):
     db.session.commit()
     return redirect(url_for('users'))
 
+
+@app.route('/missas', methods=['GET', 'POST'])
+@priest_only
+def masses():
+    if request.method == 'POST':
+        title = request.form.get('title', '').strip()[:110]
+        frequency = request.form.get('frequency')
+        unit_id = request.form.get('unit_id', type=int)
+        unit = db.session.get(Unit, unit_id) if unit_id else None
+        time = request.form.get('time', '')
+        try: start = date.fromisoformat(request.form.get('start_date', ''))
+        except ValueError: start = None
+        valid_time = len(time) == 5 and time[2] == ':' and time[:2].isdigit() and time[3:].isdigit() and int(time[:2]) < 24 and int(time[3:]) < 60
+        weekday = request.form.get('weekday', type=int)
+        month_day = request.form.get('month_day', type=int)
+        valid_rule = (frequency == 'semanal' and weekday is not None and 0 <= weekday <= 6) or (frequency == 'mensal' and month_day is not None and 1 <= month_day <= 31)
+        if not title or not unit or not unit.active or unit.kind != 'comunidade' or not valid_time or not start or not valid_rule:
+            flash('Revise os campos e escolha uma comunidade ativa.', 'error')
+        else:
+            schedule = MassSchedule(title=title, frequency=frequency, unit_id=unit.id,
+                time=time, start_date=start,
+                weekday=weekday if frequency == 'semanal' else None,
+                month_day=month_day if frequency == 'mensal' else None)
+            db.session.add(schedule)
+            db.session.flush()
+            audit('criar', 'missa', schedule.id, title)
+            db.session.commit()
+            flash('Missa recorrente cadastrada.', 'success')
+        return redirect(url_for('masses'))
+    schedules = MassSchedule.query.order_by(MassSchedule.active.desc(), MassSchedule.title).all()
+    church_units = Unit.query.filter_by(active=True, kind='comunidade').order_by(Unit.name).all()
+    pending = MassCollection.query.filter_by(status='pendente').order_by(MassCollection.created_at.desc()).all()
+    recent = MassCollection.query.order_by(MassCollection.created_at.desc()).limit(30).all()
+    return render_template('masses.html', schedules=schedules, units=church_units,
+                           pending=pending, recent=recent, today=date.today())
+
+@app.post('/missas/<int:schedule_id>/toggle')
+@priest_only
+def toggle_mass(schedule_id):
+    schedule = db.get_or_404(MassSchedule, schedule_id)
+    schedule.active = not schedule.active
+    audit('ativar' if schedule.active else 'desativar', 'missa', schedule.id, schedule.title)
+    db.session.commit()
+    return redirect(url_for('masses'))
+
+@app.get('/coletas')
+@login_required
+def collections():
+    require_staff('collections')
+    schedules = MassSchedule.query.filter_by(active=True).order_by(MassSchedule.time).all()
+    today = date.today()
+    existing = {(r.schedule_id, r.celebration_date) for r in MassCollection.query.filter(
+        MassCollection.celebration_date >= today - timedelta(days=7),
+        MassCollection.celebration_date <= today + timedelta(days=21)).all()}
+    upcoming = []
+    for schedule in schedules:
+        for day in mass_dates(schedule, today):
+            if (schedule.id, day) not in existing:
+                upcoming.append({'schedule': schedule, 'date': day})
+    upcoming.sort(key=lambda item: (item['date'], item['schedule'].time, item['schedule'].title))
+    records = MassCollection.query.filter_by(created_by=current_user.id).order_by(
+        MassCollection.created_at.desc()).limit(12).all()
+    return render_template('collections.html', upcoming=upcoming, records=records, today=today)
+
+@app.post('/coletas')
+@login_required
+def submit_collection():
+    require_staff('collections')
+    schedule = db.get_or_404(MassSchedule, request.form.get('schedule_id', type=int))
+    try: day = date.fromisoformat(request.form.get('celebration_date', ''))
+    except ValueError: abort(400)
+    if not schedule.active or day not in mass_dates(schedule):
+        abort(400, 'Missa fora do período permitido.')
+    amount = parse_money(request.form.get('amount', ''))
+    if amount is None:
+        flash('Digite o valor arrecadado, maior que zero.', 'error')
+        return redirect(url_for('collections'))
+    if MassCollection.query.filter_by(schedule_id=schedule.id, celebration_date=day).first():
+        flash('A coleta desta missa já foi informada.', 'error')
+        return redirect(url_for('collections'))
+    collection = MassCollection(schedule_id=schedule.id, celebration_date=day,
+        amount=amount, created_by=current_user.id)
+    db.session.add(collection)
+    try:
+        db.session.flush()
+        audit('registrar', 'coleta', collection.id, f'R$ {amount}')
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        flash('Esta missa já tem uma coleta cadastrada.', 'error')
+        return redirect(url_for('collections'))
+    flash('Coleta enviada! O padre vai conferir e aprovar.', 'success')
+    return redirect(url_for('collections'))
+
+@app.post('/coletas/<int:collection_id>/<action>')
+@priest_only
+def review_collection(collection_id, action):
+    if action not in ('aprovar', 'rejeitar'): abort(404)
+    collection = db.get_or_404(MassCollection, collection_id)
+    if collection.status != 'pendente': abort(409, 'Coleta já analisada.')
+    if action == 'aprovar':
+        entry = Entry(kind='receita', category='Coleta',
+            description=f'Coleta da missa {collection.schedule.title} em {collection.celebration_date.strftime("%d/%m/%Y")}',
+            amount=collection.amount, status='aprovado',
+            created_by=collection.created_by, reviewed_by=current_user.id,
+            reviewed_at=datetime.now(timezone.utc), unit_id=collection.schedule.unit_id,
+            reference=f'coleta-missa-{collection.id}')
+        db.session.add(entry)
+        db.session.flush()
+        collection.entry_id = entry.id
+        collection.status = 'aprovado'
+    else:
+        collection.status = 'rejeitado'
+    collection.reviewed_by = current_user.id
+    collection.reviewed_at = datetime.now(timezone.utc)
+    audit(action, 'coleta', collection.id, f'R$ {collection.amount}')
+    db.session.commit()
+    flash('Coleta analisada com sucesso.', 'success')
+    return redirect(url_for('masses'))
+
 @app.cli.command('init-db')
 def init_db():
     db.create_all()
     print('Tabelas criadas. Para atualizar banco existente, veja README sobre migrações.')
+
+@app.cli.command('upgrade-collections')
+def upgrade_collections():
+    """Cria somente as tabelas adicionais sem alterar lançamentos existentes."""
+    db.create_all(tables=[StaffPermission.__table__, MassSchedule.__table__, MassCollection.__table__])
+    print('Tabelas de permissões, missas e coletas criadas sem apagar dados.')
 
 @app.cli.command('create-user')
 def create_user():
