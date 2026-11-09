@@ -1,0 +1,42 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="collection-page">
+<div class="collection-intro">
+<p class="eyebrow">PARÓQUIA SANTA TEREZINHA DO MENINO JESUS</p>
+<h1>Registrar coleta da missa</h1>
+<p>Escolha a missa, digite o valor e toque no botão verde. Pronto!</p>
+</div>
+{% if upcoming %}
+<div class="mass-option-list">
+{% for item in upcoming %}
+<article class="mass-option">
+<span class="mass-date">{{item.date.strftime('%d/%m/%Y')}}</span>
+<h2>{{item.schedule.title}}</h2>
+<p class="mass-location">{{item.schedule.unit.name}} · {{item.schedule.time}}</p>
+<form method="post" action="{{url_for('submit_collection')}}" class="collection-form" onsubmit="return confirm('Confirmar o envio deste valor? O padre fará a conferência.')">
+<input type="hidden" name="csrf_token" value="{{csrf_token}}">
+<input type="hidden" name="schedule_id" value="{{item.schedule.id}}">
+<input type="hidden" name="celebration_date" value="{{item.date.isoformat()}}">
+<label>Quanto foi arrecadado? (R$)
+<input class="collection-amount" type="number" name="amount" inputmode="decimal" min="0.01" max="9999999999.99" step="0.01" placeholder="0,00" aria-label="Valor arrecadado" required>
+</label>
+<button type="submit" class="collection-submit">Enviar valor da coleta ✓</button>
+</form>
+</article>
+{% endfor %}
+</div>
+{% else %}
+<div class="card collection-empty"><h2>Nenhuma missa disponível agora</h2><p>O padre poderá cadastrar os horários das missas. Se você já informou todas as coletas, não precisa fazer mais nada.</p></div>
+{% endif %}
+{% if records %}
+<section class="card collection-history"><h2>Meus últimos envios</h2>
+{% for c in records %}
+<div class="collection-record">
+<span><b>{{c.schedule.title}}</b><small>{{c.celebration_date.strftime('%d/%m/%Y')}}</small></span>
+<span><b>R$ {{'%.2f'|format(c.amount)|replace('.',',')}}</b><small>{{'Aguardando conferência' if c.status == 'pendente' else 'Aprovada' if c.status == 'aprovado' else 'Não aprovada'}}</small></span>
+</div>
+{% endfor %}
+</section>
+{% endif %}
+</div>
+{% endblock %}
