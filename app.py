@@ -1,13 +1,17 @@
-import os, secrets, csv, io
+import os, secrets, csv, io, re
+from base64 import b64encode
 from datetime import datetime, timezone, date, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import wraps
 import click
+import qrcode
+from qrcode.image.svg import SvgPathImage
+from pix import pix_payload, pix_text
 from flask import Flask, render_template, request, redirect, url_for, flash, abort, session, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
-from sqlalchemy import func, UniqueConstraint
+from sqlalchemy import func, update, UniqueConstraint
 from sqlalchemy.exc import IntegrityError
 from dotenv import load_dotenv
 
@@ -64,6 +68,26 @@ class Audit(db.Model):
     entity_id = db.Column(db.Integer, nullable=False)
     details = db.Column(db.String(500), nullable=False, default='')
     user = db.relationship('User')
+
+
+CONTRIBUTION_TYPES = {'dizimo': 'Dízimo', 'doacao': 'Doação'}
+CONTRIBUTION_UNITS = (
+    'Matriz Santa Terezinha do Menino Jesus',
+    'Capela Santa Luzia',
+)
+
+
+class Contribution(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    txid = db.Column(db.String(25), unique=True, nullable=False)
+    payload = db.Column(db.String(300), nullable=False)
+    category = db.Column(db.String(10), nullable=False)
+    unit_id = db.Column(db.Integer, db.ForeignKey('unit.id'), nullable=False)
+    unit = db.relationship('Unit')
+    amount = db.Column(db.Numeric(12, 2), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    entry_id = db.Column(db.Integer, db.ForeignKey('entry.id'), unique=True)
+    bank_id = db.Column(db.String(32), unique=True)
 
 
 class StaffPermission(db.Model):
@@ -573,6 +597,113 @@ def review_collection(collection_id, action):
     db.session.commit()
     flash('Coleta analisada com sucesso.', 'success')
     return redirect(url_for('masses'))
+
+def pix_settings():
+    key = os.getenv('PARISH_PIX_KEY', '').strip()
+    name = pix_text(os.getenv('PARISH_PIX_NAME', ''), 25)
+    city = pix_text(os.getenv('PARISH_PIX_CITY', ''), 15)
+    if name and city and re.fullmatch(r'[!-~]{1,77}', key):
+        return key, name, city
+    return None
+
+
+@app.route('/contribuir', methods=['GET', 'POST'])
+def contribute():
+    settings = pix_settings()
+    if not settings:
+        return render_template('contribute.html', available=False), 503
+
+    units = Unit.query.filter(Unit.active.is_(True), Unit.name.in_(CONTRIBUTION_UNITS)).order_by(Unit.name).all()
+    if request.method == 'POST':
+        category = request.form.get('category')
+        unit_id = request.form.get('unit_id', type=int)
+        amount = parse_money(request.form.get('amount'))
+        if category not in CONTRIBUTION_TYPES or unit_id not in {unit.id for unit in units} or amount is None:
+            flash('Confira o tipo, o local e o valor da contribuição.', 'error')
+            return redirect(url_for('contribute'))
+
+        txid = secrets.token_hex(12).upper()
+        contribution = Contribution(txid=txid, payload=pix_payload(*settings, amount, txid),
+                                    category=category, unit_id=unit_id, amount=amount)
+        db.session.add(contribution)
+        db.session.commit()
+        return redirect(url_for('contribution_pix', txid=contribution.txid), code=303)
+
+    return render_template('contribute.html', available=bool(units), units=units, types=CONTRIBUTION_TYPES)
+
+
+@app.get('/contribuir/<txid>')
+def contribution_pix(txid):
+    settings = pix_settings()
+    if not settings:
+        return render_template('contribute.html', available=False), 503
+
+    contribution = Contribution.query.filter_by(txid=txid).first_or_404()
+    if contribution.entry_id is not None:
+        return render_template('contribute.html', available=True, confirmed=True)
+
+    svg = io.BytesIO()
+    qrcode.make(contribution.payload, image_factory=SvgPathImage).save(svg)
+    return render_template('contribute.html', available=True, contribution=contribution,
+                           qr=b64encode(svg.getvalue()).decode('ascii'))
+
+
+@app.get('/dizimos')
+@priest_only
+def contributions():
+    pending = request.args.get('status') != 'confirmado'
+    query = Contribution.query.filter(Contribution.entry_id.is_(None) if pending else Contribution.entry_id.is_not(None))
+    records = query.order_by(Contribution.id.desc()).paginate(per_page=30)
+    return render_template('contributions.html', records=records, pending=pending,
+                           types=CONTRIBUTION_TYPES, pix_enabled=bool(pix_settings()))
+
+
+@app.post('/dizimos/<int:contribution_id>/confirmar')
+@priest_only
+def confirm_contribution(contribution_id):
+    bank_id = request.form.get('bank_id', '').strip()
+    if not re.fullmatch(r'E[0-9]{8}[A-Za-z0-9]{23}', bank_id):
+        flash('Informe o identificador EndToEnd de 32 caracteres que consta no extrato.', 'error')
+        return redirect(url_for('contributions'))
+
+    contribution = db.get_or_404(Contribution, contribution_id)
+    if contribution.entry_id is not None:
+        abort(409, 'Contribuição já confirmada.')
+
+    category = CONTRIBUTION_TYPES[contribution.category]
+    now = datetime.now(timezone.utc)
+    entry = Entry(kind='receita', category=category, description=f'{category} via Pix',
+                  amount=contribution.amount, status='aprovado', created_by=current_user.id,
+                  reviewed_by=current_user.id, reviewed_at=now, unit_id=contribution.unit_id,
+                  reference=bank_id)
+    try:
+        claimed = db.session.execute(
+            update(Contribution)
+            .where(Contribution.id == contribution_id, Contribution.entry_id.is_(None))
+            .values(bank_id=bank_id)
+        )
+        if claimed.rowcount != 1:
+            abort(409, 'Contribuição já confirmada.')
+        db.session.add(entry)
+        db.session.flush()
+        contribution.entry_id = entry.id
+        audit('confirmar', 'contribuicao', contribution.id, f'R$ {contribution.amount} · {bank_id}')
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        flash('Esse identificador bancário já foi usado em uma contribuição.', 'error')
+        return redirect(url_for('contributions'))
+
+    flash('Pagamento confirmado e incluído no financeiro.', 'success')
+    return redirect(url_for('contributions'))
+
+
+@app.cli.command('upgrade-contributions')
+def upgrade_contributions():
+    """Cria a tabela de contribuições em bancos existentes."""
+    Contribution.__table__.create(bind=db.engine, checkfirst=True)
+    click.echo('Tabela de contribuições pronta.')
+
 
 @app.cli.command('init-db')
 def init_db():

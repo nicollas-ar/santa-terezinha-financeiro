@@ -84,3 +84,17 @@ flask --app app seed-parish-units
 O primeiro comando cria três tabelas novas (`staff_permission`, `mass_schedule`, `mass_collection`), sem apagar ou modificar as tabelas financeiras existentes. O segundo assegura que Matriz e Capela estejam cadastradas. Faça backup do banco antes da atualização. Não repita `create-user`: a conta do padre continua no banco.
 
 **Importante:** esta é uma evolução de protótipo, ainda não validada para uso financeiro real; faltam testes integrados, backup/restauração, proteção de dados e procedimentos de conferência.
+
+## Dízimos e doações por Pix
+
+Em um banco existente, execute `flask --app app upgrade-contributions` antes de abrir o novo painel. O comando cria somente a tabela de contribuições e pode ser repetido. Use `flask --app app seed-parish-units` se a Matriz e a Capela ainda precisarem ser cadastradas.
+
+Para ativar a página pública `/contribuir`, configure no Render as variáveis abaixo com os dados da conta da paróquia. Prefira uma chave institucional, pois ela fica visível no código Pix.
+
+- `PARISH_PIX_KEY` — chave Pix cadastrada no banco, no formato aceito pelo Pix.
+- `PARISH_PIX_NAME` — nome do recebedor, com até 25 caracteres.
+- `PARISH_PIX_CITY` — cidade do recebedor, com até 15 caracteres.
+
+O padre encontra **Dízimos e doações** no menu e pode compartilhar o endereço da página pública, inclusive no WhatsApp. O QR Code e o código copia e cola são gerados com o valor escolhido e uma referência Pix (TxId). A página não solicita nome ou CPF.
+
+Gerar o código cria um registro pendente. Só confirme após conferir no banco a referência e o valor do pagamento. Use o identificador EndToEnd do extrato para evitar que o mesmo pagamento seja lançado duas vezes. A confirmação cria uma única receita de Dízimo ou Doação para a unidade escolhida, no caixa consolidado. Este fluxo usa conferência manual e requer que o banco informe o TxId e o EndToEnd no extrato ou na área de consulta de Pix recebidos. Antes de divulgar o endereço, teste com a conta institucional e confira os dois identificadores e o valor.

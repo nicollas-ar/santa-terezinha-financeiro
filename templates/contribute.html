@@ -1,0 +1,60 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="collection-page">
+  <div class="collection-intro">
+    <p class="eyebrow">PARÓQUIA SANTA TEREZINHA DO MENINO JESUS</p>
+    <h1>Dízimos e doações</h1>
+    <p>Contribua com a nossa paróquia pelo Pix.</p>
+  </div>
+  <section class="card">
+    {% if not available %}
+      <p>O Pix da paróquia está indisponível no momento.</p>
+    {% elif confirmed %}
+      <p>Esta contribuição já foi confirmada pela paróquia.</p>
+      <a href="{{ url_for('contribute') }}">Nova contribuição</a>
+    {% elif contribution %}
+      <h2>Pix de R$ {{ ('%.2f'|format(contribution.amount))|replace('.', ',') }}</h2>
+      <p>Escaneie no aplicativo do seu banco ou copie o código. Confira o nome do recebedor antes de pagar.</p>
+      <img src="data:image/svg+xml;base64,{{ qr }}" alt="QR Code Pix" width="240" height="240" style="max-width:100%;height:auto;background:white">
+      <label for="pix-code">Pix copia e cola</label>
+      <textarea id="pix-code" rows="3" readonly>{{ contribution.payload }}</textarea>
+      <button type="button" class="collection-submit" id="copy-pix">Copiar código Pix</button>
+      <p role="status" id="copy-status"></p>
+      <p>Guarde o comprovante do banco. A paróquia confere o pagamento pelo extrato.</p>
+      <a href="{{ url_for('contribute') }}">Nova contribuição</a>
+      <script>
+        const copyButton = document.getElementById('copy-pix');
+        const pixCode = document.getElementById('pix-code');
+        const copyStatus = document.getElementById('copy-status');
+        copyButton.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(pixCode.value);
+            copyStatus.textContent = 'Código copiado.';
+          } catch {
+            pixCode.select();
+            copyStatus.textContent = 'Selecione a opção de copiar no seu dispositivo.';
+          }
+        });
+      </script>
+    {% else %}
+      <form method="post" class="collection-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>Tipo de contribuição
+          <select name="category" required>
+            {% for key, label in types.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Local
+          <select name="unit_id" required>
+            {% for unit in units %}<option value="{{ unit.id }}">{{ unit.name }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Valor em reais
+          <input class="collection-amount" type="text" name="amount" inputmode="decimal" maxlength="13" placeholder="0,00" required>
+        </label>
+        <button type="submit" class="collection-submit">Gerar Pix</button>
+      </form>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

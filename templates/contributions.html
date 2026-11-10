@@ -1,0 +1,47 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="collection-intro">
+  <h1>Dízimos e doações</h1>
+  {% if pix_enabled %}
+    <p><a href="{{ url_for('contribute') }}">Abrir página pública de contribuição</a> e copiar o endereço para compartilhar no WhatsApp.</p>
+  {% else %}
+    <p>Configure o Pix paroquial para habilitar a página pública.</p>
+  {% endif %}
+</div>
+<section class="card">
+  <p>
+    <a href="{{ url_for('contributions', status='pendente') }}" {% if pending %}aria-current="page"{% endif %}>Aguardando conferência</a>
+    ·
+    <a href="{{ url_for('contributions', status='confirmado') }}" {% if not pending %}aria-current="page"{% endif %}>Confirmados</a>
+  </p>
+  {% if pending %}<p>Confira no banco o valor e a referência Pix antes de confirmar. Copie do extrato o identificador EndToEnd do pagamento recebido.</p>{% endif %}
+  {% for item in records.items %}
+    <article class="mass-option">
+      <h2>{{ types[item.category] }} · R$ {{ ('%.2f'|format(item.amount))|replace('.', ',') }}</h2>
+      <p>{{ item.unit.name }} · {{ item.created_at.strftime('%d/%m/%Y') }}</p>
+      <p>Referência Pix (TxId) <code>{{ item.txid }}</code></p>
+      {% if pending %}
+        <form class="collection-form" method="post" action="{{ url_for('confirm_contribution', contribution_id=item.id) }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label>Identificador bancário (EndToEnd)
+            <input name="bank_id" maxlength="32" minlength="32" pattern="E[0-9]{8}[A-Za-z0-9]{23}" required>
+          </label>
+          <button class="collection-submit" type="submit">Confirmar pagamento recebido</button>
+        </form>
+      {% else %}
+        <p>Identificador bancário <code>{{ item.bank_id }}</code></p>
+      {% endif %}
+    </article>
+  {% else %}
+    <p>Nenhuma contribuição nesta lista.</p>
+  {% endfor %}
+  {% if records.has_prev or records.has_next %}
+    <p>
+      {% set status = 'pendente' if pending else 'confirmado' %}
+      {% if records.has_prev %}<a href="{{ url_for('contributions', status=status, page=records.prev_num) }}">Anterior</a>{% endif %}
+      Página {{ records.page }} de {{ records.pages }}
+      {% if records.has_next %}<a href="{{ url_for('contributions', status=status, page=records.next_num) }}">Próxima</a>{% endif %}
+    </p>
+  {% endif %}
+</section>
+{% endblock %}
