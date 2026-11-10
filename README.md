@@ -84,3 +84,35 @@ flask --app app seed-parish-units
 O primeiro comando cria três tabelas novas (`staff_permission`, `mass_schedule`, `mass_collection`), sem apagar ou modificar as tabelas financeiras existentes. O segundo assegura que Matriz e Capela estejam cadastradas. Faça backup do banco antes da atualização. Não repita `create-user`: a conta do padre continua no banco.
 
 **Importante:** esta é uma evolução de protótipo, ainda não validada para uso financeiro real; faltam testes integrados, backup/restauração, proteção de dados e procedimentos de conferência.
+
+## Dízimos e doações por Pix
+
+Em um banco existente, execute `flask --app app upgrade-contributions` antes de abrir o novo painel. O comando cria somente a tabela de contribuições e pode ser repetido. Use `flask --app app seed-parish-units` se a Matriz e a Capela ainda precisarem ser cadastradas.
+
+Para ativar a página pública `/contribuir`, configure no Render as variáveis abaixo com os dados da conta da paróquia. Prefira uma chave institucional, pois ela fica visível no código Pix.
+
+- `PARISH_PIX_KEY` — chave Pix cadastrada no banco, no formato aceito pelo Pix.
+- `PARISH_PIX_NAME` — nome do recebedor, com até 25 caracteres.
+- `PARISH_PIX_CITY` — cidade do recebedor, com até 15 caracteres.
+
+O padre encontra **Dízimos e doações** no menu e pode compartilhar o endereço da página pública, inclusive no WhatsApp. O QR Code e o código copia e cola são gerados com o valor escolhido e uma referência Pix (TxId). A página não solicita nome ou CPF.
+
+Gerar o código cria um registro pendente. Só confirme após conferir no banco a referência e o valor do pagamento. Use o identificador EndToEnd do extrato para evitar que o mesmo pagamento seja lançado duas vezes. A confirmação cria uma única receita de Dízimo ou Doação para a unidade escolhida, no caixa consolidado. Este fluxo usa conferência manual e requer que o banco informe o TxId e o EndToEnd no extrato ou na área de consulta de Pix recebidos. Antes de divulgar o endereço, teste com a conta institucional e confira os dois identificadores e o valor.
+
+### Checkout Pix com confirmação automática e lembretes no WhatsApp
+
+Execute `flask --app app upgrade-contributions` novamente para criar as novas tabelas, e `flask --app app enable-pix-ledger` para criar o usuário técnico de auditoria. O usuário técnico fica inativo para login. Configure `PARISH_PUBLIC_URL` com a origem HTTPS pública do app, sem caminho ou barra final. Use um ambiente e um banco separados para os testes.
+
+**Asaas.** Configure `ASAAS_MODE=sandbox` no ambiente de testes ou `ASAAS_MODE=production` no ambiente paroquial, `ASAAS_API_KEY` e `ASAAS_WEBHOOK_TOKEN` (segredo aleatório de pelo menos 32 caracteres, diferente da chave da API). No mesmo ambiente do Asaas, cadastre o webhook para `POST /integracoes/asaas`, com o mesmo segredo, no modo sequencial, para `CHECKOUT_PAID`, `CHECKOUT_CANCELED` e `CHECKOUT_EXPIRED`. Confira no Sandbox os dados que o Checkout pede do fiel, o link de retorno e o conteúdo do webhook.
+
+Com o Asaas habilitado, novas contribuições de R$ 5,00 ou mais usam o checkout hospedado pelo Asaas. O Asaas pode solicitar dados do pagador. A tela paroquial aguarda o evento autenticado de pagamento e exibe a confirmação após o lançamento. O lançamento registra o valor bruto. Use o extrato do Asaas para conciliar taxas e eventuais devoluções, que ainda não geram ajustes automáticos. Contribuições com códigos Pix estáticos já emitidos continuam no fluxo manual. A página de status confirma o pagamento ao fiel. Ela não envia recibo pelo WhatsApp.
+
+**WhatsApp.** Configure `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM` no formato `whatsapp:+55...` e `TWILIO_REMINDER_CONTENT_SID` com o SID de um modelo aprovado para WhatsApp. No remetente, configure a URL de mensagens recebidas como `POST /integracoes/whatsapp` na origem pública exata, sem parâmetros. O fiel ativa os lembretes enviando **QUERO LEMBRETES** do próprio WhatsApp. Ele pode sair com **SAIR**.
+
+O modelo aprovado precisa ter duas variáveis. A primeira é o trecho que o padre edita, com até 120 caracteres e uma linha. A segunda é o endereço da página de contribuição. Exemplo de estrutura para submeter à aprovação:
+
+> Olá! Este é o lembrete mensal de dízimo da Paróquia Santa Terezinha. {{1}} Para contribuir com segurança, acesse {{2}}. Para deixar de receber lembretes, responda SAIR.
+
+O padre escolhe o dia (1 a 28), o horário de São Paulo e o trecho editável no painel. Os lembretes começam desativados. Para executar os envios, configure um Cron Job no Render, com a mesma revisão de código, o build `pip install -r requirements.txt`, o comando `flask --app app send-parish-reminders` e o agendamento `*/5 * * * *`. O job usa as mesmas variáveis de banco, Asaas/Pix e WhatsApp. Ele executa em UTC e converte para o horário de São Paulo dentro da aplicação.
+
+Cada telefone autorizado recebe no máximo uma tentativa por mês, em lotes de até 50. O painel diferencia tentativas aceitas pelo provedor de falhas e envios em processamento. Em caso de falha ou queda durante o envio, consulte os logs do Twilio antes de qualquer reenvio. A confirmação de entrega ao celular não é exibida no painel. Teste o número e o template com um contato de teste que tenha aderido antes de ativar o envio da paróquia.

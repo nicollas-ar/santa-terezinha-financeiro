@@ -1,0 +1,36 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="collection-page">
+  <div class="collection-intro">
+    <p class="eyebrow">PARÓQUIA SANTA TEREZINHA DO MENINO JESUS</p>
+    <h1>Minha contribuição</h1>
+  </div>
+  <section class="card" aria-live="polite">
+    {% if checkout.status == 'confirmado' %}
+      <h2>Pix confirmado</h2>
+      <p>Recebemos R$ {{ ('%.2f'|format(checkout.contribution.amount))|replace('.', ',') }}. Obrigado pela sua contribuição!</p>
+    {% elif checkout.status == 'pendente' %}
+      <h2>Aguardando confirmação</h2>
+      <p>Se você já pagou, aguarde a confirmação do Pix. Esta página é atualizada automaticamente por dois minutos.</p>
+      <p><a href="{{ url_for('checkout_status', txid=checkout.contribution.txid) }}">Consultar novamente</a></p>
+      <script>
+        let checks = 0;
+        const checkPayment = async () => {
+          try {
+            const response = await fetch('?formato=json', {cache: 'no-store'});
+            if (response.ok && (await response.json()).status !== 'pendente') {
+              window.location.reload();
+              return;
+            }
+          } catch {}
+          if (++checks < 24) setTimeout(checkPayment, 5000);
+        };
+        setTimeout(checkPayment, 5000);
+      </script>
+    {% else %}
+      <h2>Pagamento {{ checkout.status }}</h2>
+      <a href="{{ url_for('contribute') }}">Voltar para contribuições</a>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

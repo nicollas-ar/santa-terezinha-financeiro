@@ -1,13 +1,25 @@
-import os, secrets, csv, io
+import os, secrets, csv, io, re
+from base64 import b64encode
 from datetime import datetime, timezone, date, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import wraps
+from zoneinfo import ZoneInfo
+from urllib.parse import urlencode
 import click
+import qrcode
+from qrcode.image.svg import SvgPathImage
+from pix import pix_payload, pix_text
+from contribution_providers import (
+    ProviderError, asaas_mode, create_pix_checkout, public_url,
+    reminder_template, send_reminder, whatsapp_sender,
+)
+from twilio.request_validator import RequestValidator
+from twilio.twiml.messaging_response import MessagingResponse
 from flask import Flask, render_template, request, redirect, url_for, flash, abort, session, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
-from sqlalchemy import func, UniqueConstraint
+from sqlalchemy import func, update, UniqueConstraint
 from sqlalchemy.exc import IntegrityError
 from dotenv import load_dotenv
 
@@ -64,6 +76,61 @@ class Audit(db.Model):
     entity_id = db.Column(db.Integer, nullable=False)
     details = db.Column(db.String(500), nullable=False, default='')
     user = db.relationship('User')
+
+
+INTEGRATION_USER = 'sistema-pix'
+WEBHOOK_ENDPOINTS = {'asaas_webhook', 'whatsapp_webhook'}
+CONTRIBUTION_TYPES = {'dizimo': 'Dízimo', 'doacao': 'Doação'}
+CONTRIBUTION_UNITS = (
+    'Matriz Santa Terezinha do Menino Jesus',
+    'Capela Santa Luzia',
+)
+
+
+class Contribution(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    txid = db.Column(db.String(25), unique=True, nullable=False)
+    payload = db.Column(db.String(300), nullable=False)
+    category = db.Column(db.String(10), nullable=False)
+    unit_id = db.Column(db.Integer, db.ForeignKey('unit.id'), nullable=False)
+    unit = db.relationship('Unit')
+    amount = db.Column(db.Numeric(12, 2), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    entry_id = db.Column(db.Integer, db.ForeignKey('entry.id'), unique=True)
+    bank_id = db.Column(db.String(32), unique=True)
+
+
+class PixCheckout(db.Model):
+    contribution_id = db.Column(db.Integer, db.ForeignKey('contribution.id'), primary_key=True)
+    contribution = db.relationship('Contribution', backref=db.backref('checkout', uselist=False))
+    provider_id = db.Column(db.String(36), unique=True, nullable=False)
+    status = db.Column(db.String(12), nullable=False, default='pendente')
+
+
+class ReminderSettings(db.Model):
+    id = db.Column(db.Integer, primary_key=True, default=1)
+    enabled = db.Column(db.Boolean, nullable=False, default=False)
+    day = db.Column(db.Integer, nullable=False, default=5)
+    time = db.Column(db.String(5), nullable=False, default='09:00')
+    snippet = db.Column(db.String(120), nullable=False, default='Agradecemos sua contribuição com a nossa paróquia.')
+
+
+class ReminderSubscriber(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    phone = db.Column(db.String(26), unique=True, nullable=False)
+    opted_in = db.Column(db.Boolean, nullable=False)
+    changed_at = db.Column(db.DateTime(timezone=True), nullable=False)
+
+
+class ReminderConsentEvent(db.Model):
+    provider_id = db.Column(db.String(34), primary_key=True)
+
+
+class ReminderDelivery(db.Model):
+    subscriber_id = db.Column(db.Integer, db.ForeignKey('reminder_subscriber.id'), primary_key=True)
+    period = db.Column(db.String(7), primary_key=True)
+    status = db.Column(db.String(12), nullable=False)
+    provider_id = db.Column(db.String(34))
 
 
 class StaffPermission(db.Model):
@@ -138,6 +205,8 @@ def load_user(uid):
 
 @app.before_request
 def check_csrf():
+    if request.endpoint in WEBHOOK_ENDPOINTS:
+        return
     if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
         token = request.form.get('csrf_token', '')
         if not token or not secrets.compare_digest(token, session.get('csrf_token', '')): abort(400, 'Token CSRF inválido')
@@ -419,7 +488,7 @@ def users():
             db.session.commit()
             flash('Usuário criado com suas permissões.', 'success')
         return redirect(url_for('users'))
-    people = User.query.order_by(User.username).all()
+    people = User.query.filter(User.role.in_(('padre', 'secretaria'))).order_by(User.username).all()
     permissions = {p.user_id: p for p in StaffPermission.query.all()}
     return render_template('users.html', users=people, permissions=permissions)
 
@@ -573,6 +642,339 @@ def review_collection(collection_id, action):
     db.session.commit()
     flash('Coleta analisada com sucesso.', 'success')
     return redirect(url_for('masses'))
+
+def pix_settings():
+    key = os.getenv('PARISH_PIX_KEY', '').strip()
+    name = pix_text(os.getenv('PARISH_PIX_NAME', ''), 25)
+    city = pix_text(os.getenv('PARISH_PIX_CITY', ''), 15)
+    if name and city and re.fullmatch(r'[!-~]{1,77}', key):
+        return key, name, city
+    return None
+
+
+@app.route('/contribuir', methods=['GET', 'POST'])
+def contribute():
+    online = asaas_mode()
+    settings = pix_settings()
+    if not online and not settings:
+        return render_template('contribute.html', available=False), 503
+
+    units = Unit.query.filter(Unit.active.is_(True), Unit.name.in_(CONTRIBUTION_UNITS)).order_by(Unit.name).all()
+    if request.method == 'POST':
+        category = request.form.get('category')
+        unit_id = request.form.get('unit_id', type=int)
+        amount = parse_money(request.form.get('amount'))
+        if category not in CONTRIBUTION_TYPES or unit_id not in {unit.id for unit in units} or amount is None:
+            flash('Confira o tipo, o local e o valor da contribuição.', 'error')
+            return redirect(url_for('contribute'))
+
+        txid = secrets.token_hex(12).upper()
+        if online:
+            if amount < Decimal('5.00'):
+                flash('Para pagar pelo checkout Pix, informe pelo menos R$ 5,00.', 'error')
+                return redirect(url_for('contribute'))
+            actor = User.query.filter_by(username=INTEGRATION_USER, role='integracao', active=False).first()
+            if actor is None:
+                abort(503)
+            return_url = public_url() + url_for('checkout_status', txid=txid)
+            try:
+                provider_id, link = create_pix_checkout(amount, CONTRIBUTION_TYPES[category], return_url)
+            except ProviderError as exc:
+                app.logger.warning('Falha ao criar checkout: %s', exc)
+                flash('O Pix está temporariamente indisponível. Tente novamente em instantes.', 'error')
+                return redirect(url_for('contribute'))
+            contribution = Contribution(txid=txid, payload='', category=category, unit_id=unit_id, amount=amount)
+            db.session.add(PixCheckout(contribution=contribution, provider_id=provider_id))
+            db.session.commit()
+            return redirect(link, code=303)
+
+        contribution = Contribution(txid=txid, payload=pix_payload(*settings, amount, txid),
+                                    category=category, unit_id=unit_id, amount=amount)
+        db.session.add(contribution)
+        db.session.commit()
+        return redirect(url_for('contribution_pix', txid=contribution.txid), code=303)
+
+    sender = whatsapp_sender()
+    signup = None
+    if sender and reminder_template():
+        signup = 'https://wa.me/' + sender.removeprefix('whatsapp:+') + '?' + urlencode({'text': 'QUERO LEMBRETES'})
+    return render_template('contribute.html', available=bool(units), units=units, types=CONTRIBUTION_TYPES,
+                           online=online, signup=signup)
+
+
+@app.get('/contribuir/<txid>')
+def contribution_pix(txid):
+    settings = pix_settings()
+    if not settings:
+        return render_template('contribute.html', available=False), 503
+
+    contribution = Contribution.query.filter_by(txid=txid).first_or_404()
+    if not contribution.payload:
+        abort(404)
+    if contribution.entry_id is not None:
+        return render_template('contribute.html', available=True, confirmed=True)
+
+    svg = io.BytesIO()
+    qrcode.make(contribution.payload, image_factory=SvgPathImage).save(svg)
+    return render_template('contribute.html', available=True, contribution=contribution,
+                           qr=b64encode(svg.getvalue()).decode('ascii'))
+
+
+@app.get('/dizimos')
+@priest_only
+def contributions():
+    pending = request.args.get('status') != 'confirmado'
+    query = Contribution.query.options(db.joinedload(Contribution.checkout))
+    query = query.filter(Contribution.entry_id.is_(None) if pending else Contribution.entry_id.is_not(None))
+    records = query.order_by(Contribution.id.desc()).paginate(per_page=30)
+    return render_template('contributions.html', records=records, pending=pending,
+                           types=CONTRIBUTION_TYPES, pix_enabled=bool(asaas_mode() or pix_settings()))
+
+
+@app.post('/dizimos/<int:contribution_id>/confirmar')
+@priest_only
+def confirm_contribution(contribution_id):
+    bank_id = request.form.get('bank_id', '').strip()
+    if not re.fullmatch(r'E[0-9]{8}[A-Za-z0-9]{23}', bank_id):
+        flash('Informe o identificador EndToEnd de 32 caracteres que consta no extrato.', 'error')
+        return redirect(url_for('contributions'))
+
+    contribution = db.get_or_404(Contribution, contribution_id)
+    if not contribution.payload:
+        abort(404)
+    if contribution.entry_id is not None:
+        abort(409, 'Contribuição já confirmada.')
+
+    category = CONTRIBUTION_TYPES[contribution.category]
+    now = datetime.now(timezone.utc)
+    entry = Entry(kind='receita', category=category, description=f'{category} via Pix',
+                  amount=contribution.amount, status='aprovado', created_by=current_user.id,
+                  reviewed_by=current_user.id, reviewed_at=now, unit_id=contribution.unit_id,
+                  reference=bank_id)
+    try:
+        claimed = db.session.execute(
+            update(Contribution)
+            .where(Contribution.id == contribution_id, Contribution.entry_id.is_(None))
+            .values(bank_id=bank_id)
+        )
+        if claimed.rowcount != 1:
+            abort(409, 'Contribuição já confirmada.')
+        db.session.add(entry)
+        db.session.flush()
+        contribution.entry_id = entry.id
+        audit('confirmar', 'contribuicao', contribution.id, f'R$ {contribution.amount} · {bank_id}')
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        flash('Esse identificador bancário já foi usado em uma contribuição.', 'error')
+        return redirect(url_for('contributions'))
+
+    flash('Pagamento confirmado e incluído no financeiro.', 'success')
+    return redirect(url_for('contributions'))
+
+
+@app.get('/contribuir/status/<txid>')
+def checkout_status(txid):
+    checkout = PixCheckout.query.join(Contribution).filter(Contribution.txid == txid).first_or_404()
+    if request.args.get('formato') == 'json':
+        return {'status': checkout.status}, 200, {'Cache-Control': 'no-store'}
+    return render_template('checkout_status.html', checkout=checkout), 200, {'Cache-Control': 'no-store'}
+
+
+@app.post('/integracoes/asaas')
+def asaas_webhook():
+    token = os.getenv('ASAAS_WEBHOOK_TOKEN', '')
+    received = request.headers.get('asaas-access-token', '')
+    if len(token) < 32 or not secrets.compare_digest(token.encode(), received.encode()):
+        abort(403)
+
+    event = request.get_json(silent=True)
+    if not isinstance(event, dict):
+        abort(400)
+    name = event.get('event')
+    states = {'CHECKOUT_PAID': 'confirmado', 'CHECKOUT_EXPIRED': 'expirado', 'CHECKOUT_CANCELED': 'cancelado'}
+    if not isinstance(name, str) or name not in states:
+        return '', 200
+    payload = event.get('checkout')
+    if not isinstance(payload, dict) or not isinstance(payload.get('id'), str):
+        abort(400)
+
+    checkout = PixCheckout.query.filter_by(provider_id=payload['id']).first()
+    if checkout is None or checkout.status == 'confirmado':
+        return '', 200
+    state = states[name]
+    if state != 'confirmado':
+        db.session.execute(update(PixCheckout).where(
+            PixCheckout.contribution_id == checkout.contribution_id, PixCheckout.status == 'pendente'
+        ).values(status=state))
+        db.session.commit()
+        return '', 200
+
+    contribution = checkout.contribution
+    items = payload.get('items')
+    if (not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict)
+            or items[0].get('quantity') != 1
+            or parse_money(str(items[0].get('value'))) != contribution.amount):
+        app.logger.error('Valor do webhook Pix divergente para checkout %s', checkout.provider_id)
+        abort(422)
+    actor = User.query.filter_by(username=INTEGRATION_USER, role='integracao', active=False).first()
+    if actor is None:
+        abort(503)
+
+    claimed = db.session.execute(update(PixCheckout).where(
+        PixCheckout.contribution_id == contribution.id, PixCheckout.status != 'confirmado'
+    ).values(status='confirmado'))
+    if claimed.rowcount != 1:
+        return '', 200
+
+    category = CONTRIBUTION_TYPES[contribution.category]
+    now = datetime.now(timezone.utc)
+    entry = Entry(kind='receita', category=category, description=f'{category} via Pix (Asaas)',
+                  amount=contribution.amount, status='aprovado', created_by=actor.id,
+                  reviewed_by=actor.id, reviewed_at=now, unit_id=contribution.unit_id,
+                  reference=f'asaas:{checkout.provider_id}')
+    db.session.add(entry)
+    db.session.flush()
+    contribution.entry_id = entry.id
+    db.session.add(Audit(user_id=actor.id, action='confirmar', entity='contribuicao',
+                         entity_id=contribution.id, details=f'Pix Asaas · R$ {contribution.amount}'))
+    db.session.commit()
+    return '', 200
+
+
+@app.post('/integracoes/whatsapp')
+def whatsapp_webhook():
+    sender = whatsapp_sender()
+    token = os.getenv('TWILIO_AUTH_TOKEN', '')
+    validator = RequestValidator(token)
+    webhook_url = public_url() + url_for('whatsapp_webhook')
+    if not sender or not validator.validate(webhook_url, request.form, request.headers.get('X-Twilio-Signature', '')):
+        abort(403)
+    phone = request.form.get('From', '')
+    message_sid = request.form.get('MessageSid', '')
+    if (request.form.get('To') != sender or request.form.get('AccountSid') != os.environ['TWILIO_ACCOUNT_SID']
+            or not re.fullmatch(r'whatsapp:\+[1-9][0-9]{7,14}', phone)
+            or not re.fullmatch(r'(?:SM|MM)[0-9a-fA-F]{32}', message_sid)):
+        abort(400)
+
+    command = ' '.join(request.form.get('Body', '').upper().split())
+    response = MessagingResponse()
+    if command in ('QUERO LEMBRETES', 'SAIR', 'STOP', 'CANCELAR', 'PARAR'):
+        db.session.add(ReminderConsentEvent(provider_id=message_sid))
+        try:
+            db.session.flush()
+        except IntegrityError:
+            db.session.rollback()
+            return Response(str(response), mimetype='text/xml')
+        subscriber = ReminderSubscriber.query.filter_by(phone=phone).with_for_update().first()
+        if subscriber is None:
+            subscriber = ReminderSubscriber(phone=phone)
+            db.session.add(subscriber)
+        subscriber.opted_in = command == 'QUERO LEMBRETES'
+        subscriber.changed_at = datetime.now(timezone.utc)
+        db.session.commit()
+        response.message(
+            'Você ativou os lembretes mensais da Santa Terezinha. Para cancelar, envie SAIR.'
+            if subscriber.opted_in else 'Seus lembretes da Santa Terezinha foram cancelados.'
+        )
+    return Response(str(response), mimetype='text/xml')
+
+
+@app.route('/dizimos/lembretes', methods=['GET', 'POST'])
+@priest_only
+def reminder_settings():
+    settings = db.session.get(ReminderSettings, 1)
+    if request.method == 'POST':
+        day = request.form.get('day', type=int) or 0
+        time = request.form.get('time', '')
+        snippet = ' '.join(request.form.get('snippet', '').split())
+        if not 1 <= day <= 28 or not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', time) or not 1 <= len(snippet) <= 120:
+            flash('Confira o dia, o horário e o texto do lembrete.', 'error')
+            return redirect(url_for('reminder_settings'))
+        if settings is None:
+            settings = ReminderSettings(id=1)
+            db.session.add(settings)
+        settings.day, settings.time, settings.snippet = day, time, snippet
+        settings.enabled = request.form.get('enabled') == '1'
+        audit('editar', 'lembretes', 1, f'Dia {day} às {time} · ativo: {settings.enabled}')
+        db.session.commit()
+        flash('Configuração de lembretes salva.', 'success')
+        return redirect(url_for('reminder_settings'))
+
+    period = datetime.now(ZoneInfo('America/Sao_Paulo')).strftime('%Y-%m')
+    counts = dict(db.session.query(ReminderDelivery.status, func.count())
+                  .filter_by(period=period).group_by(ReminderDelivery.status).all())
+    return render_template('reminders.html', settings=settings, counts=counts,
+                           subscribers=ReminderSubscriber.query.filter_by(opted_in=True).count(),
+                           configured=bool(whatsapp_sender() and reminder_template()))
+
+
+@app.cli.command('send-parish-reminders')
+def send_parish_reminders():
+    if not whatsapp_sender() or not reminder_template() or not (asaas_mode() or pix_settings()):
+        return
+    settings = db.session.get(ReminderSettings, 1)
+    now = datetime.now(ZoneInfo('America/Sao_Paulo'))
+    if not settings or not settings.enabled:
+        return
+    hour, minute = map(int, settings.time.split(':'))
+    scheduled = now.replace(day=settings.day, hour=hour, minute=minute, second=0, microsecond=0)
+    if not scheduled <= now < scheduled + timedelta(days=1):
+        return
+
+    period = scheduled.strftime('%Y-%m')
+    link = public_url() + '/contribuir'
+    snippet = settings.snippet
+    sent = failed = 0
+    recipients = db.session.query(ReminderSubscriber.id).filter(
+        ReminderSubscriber.opted_in.is_(True),
+        ~db.session.query(ReminderDelivery).filter_by(
+            subscriber_id=ReminderSubscriber.id, period=period
+        ).exists(),
+    ).order_by(ReminderSubscriber.id).limit(50).all()
+    for (subscriber_id,) in recipients:
+        subscriber = db.session.get(ReminderSubscriber, subscriber_id)
+        if not subscriber.opted_in:
+            continue
+        phone = subscriber.phone
+        delivery = ReminderDelivery(subscriber_id=subscriber_id, period=period, status='reservado')
+        db.session.add(delivery)
+        try:
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            continue
+        try:
+            delivery.provider_id = send_reminder(phone, snippet, link)
+            delivery.status = 'enviado'
+            sent += 1
+        except ProviderError:
+            delivery.status = 'falhou'
+            failed += 1
+        db.session.commit()
+    click.echo(f'Lembretes aceitos pelo WhatsApp: {sent}. Falhas de envio: {failed}.')
+
+
+@app.cli.command('upgrade-contributions')
+def upgrade_contributions():
+    """Cria a tabela de contribuições em bancos existentes."""
+    models = [Contribution, PixCheckout, ReminderSettings, ReminderSubscriber,
+              ReminderConsentEvent, ReminderDelivery]
+    db.metadata.create_all(bind=db.engine, tables=[model.__table__ for model in models])
+    click.echo('Tabelas de contribuições, checkouts e lembretes prontas.')
+
+
+@app.cli.command('enable-pix-ledger')
+def enable_pix_ledger():
+    actor = User.query.filter_by(username=INTEGRATION_USER).first()
+    if actor is None:
+        db.session.add(User(username=INTEGRATION_USER, role='integracao', active=False,
+                            password_hash=generate_password_hash(secrets.token_urlsafe(32))))
+        db.session.commit()
+    elif actor.role != 'integracao' or actor.active:
+        raise click.ClickException('O nome reservado sistema-pix já pertence a outra conta.')
+    click.echo('Conta interna de registro do Pix pronta.')
+
 
 @app.cli.command('init-db')
 def init_db():
