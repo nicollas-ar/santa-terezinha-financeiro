@@ -50,10 +50,14 @@
           </select>
         </label>
         <label>Valor em reais
-          <input class="collection-amount" type="text" name="amount" inputmode="decimal" maxlength="13" placeholder="0,00" required>
+          <input class="collection-amount" type="text" name="amount" inputmode="decimal" maxlength="13" placeholder="{{ '5,00 ou mais' if online else '0,00' }}" required>
         </label>
-        <button type="submit" class="collection-submit">Gerar Pix</button>
+        <button type="submit" class="collection-submit">{{ 'Continuar para o Pix' if online else 'Gerar Pix' }}</button>
       </form>
+      {% if signup %}
+        <p>Quer receber um lembrete por mês? Ao enviar a mensagem pelo WhatsApp, você autoriza os lembretes da paróquia. Envie SAIR a qualquer momento para cancelar.</p>
+        <p><a href="{{ signup }}">Receber lembretes no WhatsApp</a></p>
+      {% endif %}
     {% endif %}
   </section>
 </div>

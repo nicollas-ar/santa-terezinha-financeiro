@@ -2,6 +2,7 @@
 {% block content %}
 <div class="collection-intro">
   <h1>Dízimos e doações</h1>
+  <p><a href="{{ url_for('reminder_settings') }}">Configurar lembretes no WhatsApp</a></p>
   {% if pix_enabled %}
     <p><a href="{{ url_for('contribute') }}">Abrir página pública de contribuição</a> e copiar o endereço para compartilhar no WhatsApp.</p>
   {% else %}
@@ -10,17 +11,20 @@
 </div>
 <section class="card">
   <p>
-    <a href="{{ url_for('contributions', status='pendente') }}" {% if pending %}aria-current="page"{% endif %}>Aguardando conferência</a>
+    <a href="{{ url_for('contributions', status='pendente') }}" {% if pending %}aria-current="page"{% endif %}>Pendentes e encerrados</a>
     ·
     <a href="{{ url_for('contributions', status='confirmado') }}" {% if not pending %}aria-current="page"{% endif %}>Confirmados</a>
   </p>
-  {% if pending %}<p>Confira no banco o valor e a referência Pix antes de confirmar. Copie do extrato o identificador EndToEnd do pagamento recebido.</p>{% endif %}
+  {% if pending %}<p>O Pix Asaas é confirmado automaticamente. Para códigos Pix gerados no modo manual, confira o valor e a referência no banco e use o identificador EndToEnd.</p>{% endif %}
   {% for item in records.items %}
     <article class="mass-option">
       <h2>{{ types[item.category] }} · R$ {{ ('%.2f'|format(item.amount))|replace('.', ',') }}</h2>
       <p>{{ item.unit.name }} · {{ item.created_at.strftime('%d/%m/%Y') }}</p>
-      <p>Referência Pix (TxId) <code>{{ item.txid }}</code></p>
-      {% if pending %}
+      {% if item.checkout %}
+        <p>Pix Asaas · {{ 'Aguardando Pix' if item.checkout.status == 'pendente' else item.checkout.status|capitalize }}</p>
+        <p>Checkout <code>{{ item.checkout.provider_id }}</code></p>
+      {% elif pending %}
+        <p>Referência Pix (TxId) <code>{{ item.txid }}</code></p>
         <form class="collection-form" method="post" action="{{ url_for('confirm_contribution', contribution_id=item.id) }}">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <label>Identificador bancário (EndToEnd)
