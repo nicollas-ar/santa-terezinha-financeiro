@@ -628,6 +628,10 @@ def submit_manual_collection():
     valid_time = len(time)==5 and time[2]==':' and time[:2].isdigit() and time[3:].isdigit() and int(time[:2])<24 and int(time[3:])<60
     if not title or not valid_time or not day or day > date.today() or amount is None or (unit_id and (not unit or not unit.active)):
         flash('Revise os dados da celebração.','error'); return redirect(url_for('collections'))
+    duplicate = ManualCollection.query.filter_by(title=title, celebration_date=day, celebration_time=time, unit_id=unit_id).filter(ManualCollection.status != 'rejeitado').first()
+    if duplicate:
+        flash('Já existe uma arrecadação para esta celebração, data, horário e local. Confira antes de cadastrar novamente.', 'error')
+        return redirect(url_for('collections'))
     c = ManualCollection(title=title, celebration_date=day, celebration_time=time, amount=amount, unit_id=unit_id, created_by=current_user.id)
     db.session.add(c); db.session.flush(); audit('registrar','coleta_manual',c.id,f'R$ {amount}'); db.session.commit()
     flash('Arrecadação registrada e aguardando segunda assinatura.','success')
