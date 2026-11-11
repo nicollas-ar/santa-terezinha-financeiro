@@ -54,6 +54,7 @@ class Entry(db.Model):
     due_date = db.Column(db.Date)
     paid_date = db.Column(db.Date)
     reference = db.Column(db.String(100))
+    payment_method = db.Column(db.String(30))
 
 class Audit(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -70,6 +71,10 @@ class StaffPermission(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), primary_key=True)
     can_entries = db.Column(db.Boolean, nullable=False, default=False)
     can_collections = db.Column(db.Boolean, nullable=False, default=True)
+    can_income = db.Column(db.Boolean, nullable=False, default=False)
+    can_expenses = db.Column(db.Boolean, nullable=False, default=False)
+    can_confirm = db.Column(db.Boolean, nullable=False, default=False)
+    can_reports = db.Column(db.Boolean, nullable=False, default=False)
 
 class MassSchedule(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -99,6 +104,22 @@ class MassCollection(db.Model):
     entry_id = db.Column(db.Integer, db.ForeignKey('entry.id'), unique=True)
     entry = db.relationship('Entry')
 
+class ManualCollection(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(110), nullable=False)
+    celebration_date = db.Column(db.Date, nullable=False)
+    celebration_time = db.Column(db.String(5), nullable=False)
+    unit_id = db.Column(db.Integer, db.ForeignKey('unit.id'))
+    unit = db.relationship('Unit')
+    amount = db.Column(db.Numeric(12,2), nullable=False)
+    status = db.Column(db.String(12), nullable=False, default='pendente')
+    created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    recorder = db.relationship('User', foreign_keys=[created_by])
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    reviewed_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    reviewed_at = db.Column(db.DateTime(timezone=True))
+    entry_id = db.Column(db.Integer, db.ForeignKey('entry.id'), unique=True)
+
 def staff_capability(capability):
     if not current_user.is_authenticated or not current_user.active:
         return False
@@ -108,7 +129,9 @@ def staff_capability(capability):
         return False
     permission = db.session.get(StaffPermission, current_user.id)
     if permission is None:
-        return capability == 'entries'  # Preserva o acesso de secretarias antigas.
+        return capability == 'entries'  # Compatibilidade com contas antigas.
+    if capability == 'entries':
+        return bool(permission.can_entries or permission.can_income or permission.can_expenses or permission.can_confirm)
     return bool(getattr(permission, 'can_' + capability, False))
 
 def require_staff(capability):
@@ -193,7 +216,7 @@ def logout():
 def dashboard():
     require_staff('entries')
     q = Entry.query
-    if current_user.role != 'padre': q = q.filter_by(created_by=current_user.id)
+    if current_user.role != 'padre' and not staff_capability('confirm'): q = q.filter_by(created_by=current_user.id)
     else:
         unit_id = request.args.get('unit_id', type=int)
         if unit_id: q = q.filter_by(unit_id=unit_id)
@@ -230,13 +253,15 @@ def dashboard():
                 'expense': values['despesa'],
                 'balance': values['receita'] - values['despesa'],
             })
-    return render_template('dashboard.html', entries=entries, incoming=totals.get('receita', Decimal('0')), outgoing=totals.get('despesa', Decimal('0')), units=Unit.query.filter_by(active=True).order_by(Unit.name).all(), selected_unit=request.args.get('unit_id', type=int), location_summary=location_summary)
+    pending_manual = ManualCollection.query.filter_by(status='pendente').order_by(ManualCollection.id.desc()).limit(100).all() if staff_capability('confirm') else []
+    return render_template('dashboard.html', pending_manual=pending_manual, entries=entries, incoming=totals.get('receita', Decimal('0')), outgoing=totals.get('despesa', Decimal('0')), units=Unit.query.filter_by(active=True).order_by(Unit.name).all(), selected_unit=request.args.get('unit_id', type=int), location_summary=location_summary)
 
 @app.post('/entries')
 @login_required
 def add_entry():
-    require_staff('entries')
     kind = request.form.get('kind')
+    if not staff_capability('entries') or (current_user.role != 'padre' and not (staff_capability('income' if kind == 'receita' else 'expenses') or (db.session.get(StaffPermission, current_user.id) is None and kind in ('receita','despesa')))):
+        abort(403)
     category = request.form.get('category','').strip()[:80]
     description = request.form.get('description','').strip()[:255]
     amount = parse_money(request.form.get('amount'))
@@ -247,7 +272,10 @@ def add_entry():
     try: due_date = parse_date(request.form.get('due_date'))
     except ValueError:
         flash('Data inválida.', 'error'); return redirect(url_for('dashboard'))
-    entry = Entry(kind=kind, category=category, description=description, amount=amount, unit_id=unit_id, due_date=due_date, reference=request.form.get('reference','').strip()[:100], created_by=current_user.id)
+    method = request.form.get('payment_method', '')
+    if method not in ('pix','dinheiro','cartao','transferencia','outros'):
+        flash('Selecione a forma de pagamento ou recebimento.', 'error'); return redirect(url_for('dashboard'))
+    entry = Entry(kind=kind, category=category, description=description, amount=amount, unit_id=unit_id, due_date=due_date, reference=request.form.get('reference','').strip()[:100], payment_method=method, created_by=current_user.id)
     db.session.add(entry)
     db.session.flush()
     audit('criar', 'lancamento', entry.id, f'{kind} {amount} {category}')
@@ -256,11 +284,13 @@ def add_entry():
     return redirect(url_for('dashboard'))
 
 @app.post('/entries/<int:entry_id>/<action>')
-@priest_only
+@login_required
 def review_entry(entry_id, action):
+    require_staff('confirm')
     if action not in ('aprovar','rejeitar'): abort(404)
     entry = db.get_or_404(Entry, entry_id)
     if entry.status != 'pendente': abort(409, 'Lançamento já analisado')
+    if entry.created_by == current_user.id: abort(403, 'Não é permitido confirmar o próprio lançamento.')
     entry.status = 'aprovado' if action == 'aprovar' else 'rejeitado'
     entry.reviewed_by = current_user.id
     entry.reviewed_at = datetime.now(timezone.utc)
@@ -414,7 +444,11 @@ def users():
             if role == 'secretaria':
                 db.session.add(StaffPermission(user_id=user.id,
                     can_entries=mode in ('entries', 'both'),
-                    can_collections=mode in ('collections', 'both')))
+                    can_collections=request.form.get('can_collections') == 'on',
+                    can_income=request.form.get('can_income') == 'on',
+                    can_expenses=request.form.get('can_expenses') == 'on',
+                    can_confirm=request.form.get('can_confirm') == 'on',
+                    can_reports=request.form.get('can_reports') == 'on'))
             audit('criar', 'usuario', user.id, role)
             db.session.commit()
             flash('Usuário criado com suas permissões.', 'success')
@@ -429,16 +463,18 @@ def change_user_permissions(user_id):
     user = db.get_or_404(User, user_id)
     if user.role != 'secretaria':
         abort(400, 'A conta do padre sempre mantém o nível administrativo.')
-    mode = request.form.get('access_mode')
-    if mode not in ('collections', 'entries', 'both'):
-        abort(400)
+    # O padre define cada permissão por usuário.
     p = db.session.get(StaffPermission, user.id)
     if p is None:
         p = StaffPermission(user_id=user.id)
         db.session.add(p)
-    p.can_entries = mode in ('entries', 'both')
-    p.can_collections = mode in ('collections', 'both')
-    audit('permissoes', 'usuario', user.id, mode)
+    p.can_entries = any(request.form.get(x) == 'on' for x in ('can_income','can_expenses','can_confirm'))
+    p.can_collections = request.form.get('can_collections') == 'on'
+    p.can_income = request.form.get('can_income') == 'on'
+    p.can_expenses = request.form.get('can_expenses') == 'on'
+    p.can_confirm = request.form.get('can_confirm') == 'on'
+    p.can_reports = request.form.get('can_reports') == 'on'
+    audit('permissoes', 'usuario', user.id, 'Permissões individuais atualizadas')
     db.session.commit()
     flash('Permissões atualizadas.', 'success')
     return redirect(url_for('users'))
@@ -454,7 +490,7 @@ def toggle_user(user_id):
     return redirect(url_for('users'))
 
 
-@app.route('/missas', methods=['GET', 'POST'])
+@app.get('/missas')
 @priest_only
 def masses():
     if request.method == 'POST':
@@ -515,7 +551,9 @@ def collections():
     upcoming.sort(key=lambda item: (item['date'], item['schedule'].time, item['schedule'].title))
     records = MassCollection.query.filter_by(created_by=current_user.id).order_by(
         MassCollection.created_at.desc()).limit(12).all()
-    return render_template('collections.html', upcoming=upcoming, records=records, today=today)
+    manual_records = ManualCollection.query.filter_by(created_by=current_user.id).order_by(ManualCollection.id.desc()).limit(12).all()
+    units = Unit.query.filter_by(active=True, kind='comunidade').order_by(Unit.name).all()
+    return render_template('collections.html', upcoming=upcoming, records=records, manual_records=manual_records, units=units, today=today)
 
 @app.post('/coletas')
 @login_required
@@ -548,12 +586,14 @@ def submit_collection():
     return redirect(url_for('collections'))
 
 @app.post('/coletas/<int:collection_id>/<action>')
-@priest_only
+@login_required
 def review_collection(collection_id, action):
+    require_staff('confirm')
     if action not in ('aprovar', 'rejeitar'): abort(404)
     collection = db.session.query(MassCollection).filter_by(id=collection_id).with_for_update().first()
     if collection is None: abort(404)
     if collection.status != 'pendente': abort(409, 'Coleta já analisada.')
+    if collection.created_by == current_user.id: abort(403, 'Não é permitido confirmar a própria coleta.')
     if action == 'aprovar':
         entry = Entry(kind='receita', category='Coleta',
             description=f'Coleta da missa {collection.schedule.title} em {collection.celebration_date.strftime("%d/%m/%Y")}',
@@ -572,7 +612,49 @@ def review_collection(collection_id, action):
     audit(action, 'coleta', collection.id, f'R$ {collection.amount}')
     db.session.commit()
     flash('Coleta analisada com sucesso.', 'success')
-    return redirect(url_for('masses'))
+    return redirect(url_for('dashboard'))
+
+@app.post('/coletas/manuais')
+@login_required
+def submit_manual_collection():
+    require_staff('collections')
+    title = request.form.get('title','').strip()[:110]
+    time = request.form.get('time','')
+    amount = parse_money(request.form.get('amount',''))
+    try: day = parse_date(request.form.get('celebration_date'))
+    except ValueError: day = None
+    unit_id = request.form.get('unit_id',type=int)
+    unit = db.session.get(Unit,unit_id) if unit_id else None
+    valid_time = len(time)==5 and time[2]==':' and time[:2].isdigit() and time[3:].isdigit() and int(time[:2])<24 and int(time[3:])<60
+    if not title or not valid_time or not day or day > date.today() or amount is None or (unit_id and (not unit or not unit.active)):
+        flash('Revise os dados da celebração.','error'); return redirect(url_for('collections'))
+    duplicate = ManualCollection.query.filter_by(title=title, celebration_date=day, celebration_time=time, unit_id=unit_id).filter(ManualCollection.status != 'rejeitado').first()
+    if duplicate:
+        flash('Já existe uma arrecadação para esta celebração, data, horário e local. Confira antes de cadastrar novamente.', 'error')
+        return redirect(url_for('collections'))
+    c = ManualCollection(title=title, celebration_date=day, celebration_time=time, amount=amount, unit_id=unit_id, created_by=current_user.id)
+    db.session.add(c); db.session.flush(); audit('registrar','coleta_manual',c.id,f'R$ {amount}'); db.session.commit()
+    flash('Arrecadação registrada e aguardando segunda assinatura.','success')
+    return redirect(url_for('collections'))
+
+@app.post('/coletas/manuais/<int:collection_id>/<action>')
+@login_required
+def review_manual_collection(collection_id,action):
+    require_staff('confirm')
+    if action not in ('aprovar','rejeitar'): abort(404)
+    c = ManualCollection.query.filter_by(id=collection_id).with_for_update().first()
+    if c is None: abort(404)
+    if c.status != 'pendente': abort(409)
+    if c.created_by == current_user.id: abort(403, 'Não é permitido confirmar o próprio lançamento.')
+    c.status = 'aprovado' if action == 'aprovar' else 'rejeitado'
+    c.reviewed_by = current_user.id
+    c.reviewed_at = datetime.now(timezone.utc)
+    if action == 'aprovar':
+        entry = Entry(kind='receita',category='Coleta',description=f'{c.title} em {c.celebration_date:%d/%m/%Y} às {c.celebration_time}',amount=c.amount,status='aprovado',created_by=c.created_by,reviewed_by=current_user.id,reviewed_at=c.reviewed_at,unit_id=c.unit_id,reference=f'coleta-manual-{c.id}')
+        db.session.add(entry); db.session.flush(); c.entry_id = entry.id
+    audit(action,'coleta_manual',c.id,f'R$ {c.amount}'); db.session.commit()
+    flash('Arrecadação analisada.','success')
+    return redirect(url_for('dashboard'))
 
 @app.cli.command('init-db')
 def init_db():
@@ -582,7 +664,7 @@ def init_db():
 @app.cli.command('upgrade-collections')
 def upgrade_collections():
     """Cria somente as tabelas adicionais sem alterar lançamentos existentes."""
-    db.metadata.create_all(bind=db.engine, tables=[StaffPermission.__table__, MassSchedule.__table__, MassCollection.__table__])
+    db.metadata.create_all(bind=db.engine, tables=[StaffPermission.__table__, MassSchedule.__table__, MassCollection.__table__, ManualCollection.__table__])
     print('Tabelas de permissões, missas e coletas criadas sem apagar dados.')
 
 @app.cli.command('create-user')
@@ -630,3 +712,20 @@ def seed_parish_units():
         click.echo('Atenção: existem Matriz e unidade antiga; revise os vínculos antigos manualmente.')
     db.session.commit()
     click.echo('Unidades prontas. O financeiro consolidado continua único.')
+
+@app.cli.command('upgrade-financeiro')
+def upgrade_financeiro():
+    """Migração aditiva: não exclui dados antigos."""
+    from sqlalchemy import inspect, text
+    inspector = inspect(db.engine)
+    with db.engine.begin() as conn:
+        if 'staff_permission' in inspector.get_table_names():
+            existing = {c['name'] for c in inspector.get_columns('staff_permission')}
+            for col in ('can_income','can_expenses','can_confirm','can_reports'):
+                if col not in existing:
+                    conn.execute(text(f'ALTER TABLE staff_permission ADD COLUMN {col} BOOLEAN NOT NULL DEFAULT FALSE'))
+            conn.execute(text('UPDATE staff_permission SET can_income = TRUE, can_expenses = TRUE WHERE can_entries = TRUE AND can_income = FALSE AND can_expenses = FALSE'))
+        if 'entry' in inspector.get_table_names() and 'payment_method' not in {c['name'] for c in inspector.get_columns('entry')}:
+            conn.execute(text('ALTER TABLE entry ADD COLUMN payment_method VARCHAR(30)'))
+    db.metadata.create_all(bind=db.engine, tables=[StaffPermission.__table__,ManualCollection.__table__])
+    click.echo('Migração aditiva concluída; nenhum lançamento removido.')

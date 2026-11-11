@@ -11,12 +11,7 @@
 <label>Perfil<select name="role" id="roleSelect"><option value="secretaria">Secretaria</option><option value="padre">Padre</option></select></label>
 <label>Senha inicial (mínimo 12 caracteres)<input type="password" name="password" minlength="12" required autocomplete="new-password"></label>
 </div>
-<label id="staffAccess">Nível de acesso
-<select name="access_mode">
-<option value="collections" selected>Somente registrar coletas das missas</option>
-<option value="entries">Registrar receitas e despesas</option>
-<option value="both">Registrar receitas, despesas e coletas</option>
-</select></label>
+<div id="staffAccess"><p><b>Permissões individuais</b></p>{% for key,label in [('can_collections','Registrar arrecadações de missas'),('can_income','Registrar outras receitas'),('can_expenses','Registrar despesas'),('can_confirm','Confirmar lançamentos (segunda assinatura)'),('can_reports','Consultar relatórios')] %}<label style="display:block"><input type="checkbox" name="{{ key }}" {% if key == 'can_collections' %}checked{% endif %}> {{ label }}</label>{% endfor %}</div>
 <button type="submit">Criar conta</button>
 </form>
 </section>
@@ -31,11 +26,7 @@
 <td>{% if u.role == 'padre' %}Administrador completo{% else %}
 <form method="post" action="{{ url_for('change_user_permissions', user_id=u.id) }}" class="permissions-row">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-<select name="access_mode" aria-label="Acesso de {{ u.username }}">
-<option value="collections" {% if mode == 'collections' %}selected{% endif %}>Somente coletas</option>
-<option value="entries" {% if mode == 'entries' %}selected{% endif %}>Receitas e despesas</option>
-<option value="both" {% if mode == 'both' %}selected{% endif %}>Coletas e lançamentos</option>
-</select>
+{% for key,label in [('can_collections','Missas'),('can_income','Receitas'),('can_expenses','Despesas'),('can_confirm','Confirmar'),('can_reports','Relatórios')] %}<label style="display:block"><input type="checkbox" name="{{ key }}" {% if p and p|attr(key) %}checked{% endif %}> {{ label }}</label>{% endfor %}
 <button class="small" type="submit">Salvar acesso</button>
 </form>{% endif %}</td>
 <td>{{ 'Ativo' if u.active else 'Inativo' }}</td>

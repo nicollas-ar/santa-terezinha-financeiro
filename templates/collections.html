@@ -6,29 +6,7 @@
 <h1>Registrar coleta da missa</h1>
 <p>Escolha a missa, digite o valor e toque no botão verde. Pronto!</p>
 </div>
-{% if upcoming %}
-<div class="mass-option-list">
-{% for item in upcoming %}
-<article class="mass-option">
-<span class="mass-date">{{item.date.strftime('%d/%m/%Y')}}</span>
-<h2>{{item.schedule.title}}</h2>
-<p class="mass-location">{{item.schedule.unit.name}} · {{item.schedule.time}}</p>
-<form method="post" action="{{url_for('submit_collection')}}" class="collection-form" onsubmit="return confirm('Confirmar o envio deste valor? O padre fará a conferência.')">
-<input type="hidden" name="csrf_token" value="{{csrf_token}}">
-<input type="hidden" name="schedule_id" value="{{item.schedule.id}}">
-<input type="hidden" name="celebration_date" value="{{item.date.isoformat()}}">
-<label>Quanto foi arrecadado? (R$)
-<input class="collection-amount" type="number" name="amount" inputmode="decimal" min="0.01" max="9999999999.99" step="0.01" placeholder="0,00" aria-label="Valor arrecadado" required>
-</label>
-<button type="submit" class="collection-submit">Enviar valor da coleta ✓</button>
-</form>
-</article>
-{% endfor %}
-</div>
-{% else %}
-<div class="card collection-empty"><h2>Nenhuma missa disponível agora</h2><p>O padre poderá cadastrar os horários das missas. Se você já informou todas as coletas, não precisa fazer mais nada.</p></div>
-{% endif %}
-{% if records %}
+<section class="card"><h2>Arrecadação de uma celebração</h2><p>Informe somente o total da missa.</p><form method="post" action="{{ url_for('submit_manual_collection') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><div class="fields"><label>Nome da celebração<input name="title" maxlength="110" required placeholder="Missa dominical"></label><label>Data<input name="celebration_date" type="date" max="{{ today.isoformat() }}" required></label><label>Horário<input name="time" type="time" required></label><label>Comunidade<select name="unit_id"><option value="">Geral da paróquia</option>{% for u in units %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}</select></label><label>Valor total da missa (R$)<input name="amount" type="number" min="0.01" step="0.01" required></label></div><button>Enviar para segunda assinatura</button></form></section>{% if manual_records %}<section class="card"><h2>Minhas celebrações registradas</h2>{% for c in manual_records %}<p><b>{{ c.title }}</b> · {{ c.celebration_date.strftime('%d/%m/%Y') }} {{ c.celebration_time }} · R$ {{ '%.2f'|format(c.amount)|replace('.',',') }} · {{ c.status }}</p>{% endfor %}</section>{% endif %}{% if records %}
 <section class="card collection-history"><h2>Meus últimos envios</h2>
 {% for c in records %}
 <div class="collection-record">
