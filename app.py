@@ -729,3 +729,30 @@ def upgrade_financeiro():
             conn.execute(text('ALTER TABLE entry ADD COLUMN payment_method VARCHAR(30)'))
     db.metadata.create_all(bind=db.engine, tables=[StaffPermission.__table__,ManualCollection.__table__])
     click.echo('Migração aditiva concluída; nenhum lançamento removido.')
+
+def migrate_on_startup():
+    """Atualiza o esquema antes de aceitar requisições no Render (sem Shell)."""
+    from sqlalchemy import inspect, text
+    with app.app_context():
+        with db.engine.begin() as conn:
+            # Serializa inicializações concorrentes de workers Gunicorn no PostgreSQL.
+            if conn.dialect.name == 'postgresql':
+                conn.execute(text('SELECT pg_advisory_xact_lock(72638421)'))
+            inspector = inspect(conn)
+            tables = set(inspector.get_table_names())
+            if 'staff_permission' in tables:
+                columns = {c['name'] for c in inspector.get_columns('staff_permission')}
+                for name in ('can_income', 'can_expenses', 'can_confirm', 'can_reports'):
+                    if name not in columns:
+                        conn.execute(text(f'ALTER TABLE staff_permission ADD COLUMN {name} BOOLEAN NOT NULL DEFAULT FALSE'))
+                conn.execute(text('UPDATE staff_permission SET can_income = TRUE, can_expenses = TRUE WHERE can_entries = TRUE AND can_income = FALSE AND can_expenses = FALSE'))
+            if 'entry' in tables:
+                columns = {c['name'] for c in inspector.get_columns('entry')}
+                if 'payment_method' not in columns:
+                    conn.execute(text('ALTER TABLE entry ADD COLUMN payment_method VARCHAR(30)'))
+            StaffPermission.__table__.create(bind=conn, checkfirst=True)
+            ManualCollection.__table__.create(bind=conn, checkfirst=True)
+    app.logger.info('Migração financeira de inicialização concluída.')
+
+migrate_on_startup()
+
