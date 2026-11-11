@@ -490,7 +490,7 @@ def toggle_user(user_id):
     return redirect(url_for('users'))
 
 
-@app.route('/missas', methods=['GET', 'POST'])
+@app.get('/missas')
 @priest_only
 def masses():
     if request.method == 'POST':
@@ -612,7 +612,7 @@ def review_collection(collection_id, action):
     audit(action, 'coleta', collection.id, f'R$ {collection.amount}')
     db.session.commit()
     flash('Coleta analisada com sucesso.', 'success')
-    return redirect(url_for('masses') if current_user.role == 'padre' else url_for('dashboard'))
+    return redirect(url_for('dashboard'))
 
 @app.post('/coletas/manuais')
 @login_required
