@@ -253,7 +253,8 @@ def dashboard():
                 'expense': values['despesa'],
                 'balance': values['receita'] - values['despesa'],
             })
-    return render_template('dashboard.html', entries=entries, incoming=totals.get('receita', Decimal('0')), outgoing=totals.get('despesa', Decimal('0')), units=Unit.query.filter_by(active=True).order_by(Unit.name).all(), selected_unit=request.args.get('unit_id', type=int), location_summary=location_summary)
+    pending_manual = ManualCollection.query.filter_by(status='pendente').order_by(ManualCollection.id.desc()).limit(100).all() if staff_capability('confirm') else []
+    return render_template('dashboard.html', pending_manual=pending_manual, entries=entries, incoming=totals.get('receita', Decimal('0')), outgoing=totals.get('despesa', Decimal('0')), units=Unit.query.filter_by(active=True).order_by(Unit.name).all(), selected_unit=request.args.get('unit_id', type=int), location_summary=location_summary)
 
 @app.post('/entries')
 @login_required
