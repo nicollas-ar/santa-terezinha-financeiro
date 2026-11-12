@@ -192,6 +192,11 @@ def parse_date(value):
     try: return date.fromisoformat(value)
     except ValueError: raise ValueError('Data inválida')
 
+@app.get('/saude')
+def saude():
+    """Endpoint público e leve para monitoramento HTTP."""
+    return {'status': 'ok'}, 200
+
 @app.route('/login', methods=['GET','POST'])
 def login():
     if current_user.is_authenticated: return redirect(url_for(landing_page()))
